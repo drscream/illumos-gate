@@ -86,8 +86,8 @@ extern "C" {
 #define	LOCK_AFTER_RETRIESSTR	"deflock_after_retries="
 
 /* Defaults file */
-#define	DEFFILE		"/usr/sadm/defadduser"
-#define	DEFROLEFILE	"/usr/sadm/defaddrole"
+#define	DEFFILE		"/etc/sadm/defadduser"
+#define	DEFROLEFILE	"/etc/sadm/defaddrole"
 #define	GROUP		"/etc/group"
 
 /* various limits */

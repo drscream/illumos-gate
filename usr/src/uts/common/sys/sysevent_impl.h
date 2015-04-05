@@ -253,7 +253,7 @@ extern uint64_t log_sysevent_new_id(void);
 /* Limits */
 #define	EVCH_MAX_CHANNELS		1024
 #define	EVCH_MAX_BINDS_PER_CHANNEL	512
-#define	EVCH_MAX_SUBSCRIPTIONS		32
+#define	EVCH_MAX_SUBSCRIPTIONS		512
 #define	EVCH_SUBPOOLFACT		8
 #define	EVCH_DEFAULT_EVENTS		2000
 #define	EVCH_MAX_TRY_DELIVERY		3
