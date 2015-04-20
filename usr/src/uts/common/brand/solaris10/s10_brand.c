@@ -56,12 +56,12 @@ int	s10_brandsys(int, int64_t *, uintptr_t, uintptr_t, uintptr_t,
 void	s10_copy_procdata(proc_t *, proc_t *);
 void	s10_proc_exit(struct proc *);
 void	s10_exec();
-int	s10_initlwp(klwp_t *);
+void	s10_initlwp(klwp_t *, void *);
 void	s10_forklwp(klwp_t *, klwp_t *);
 void	s10_freelwp(klwp_t *);
 void	s10_lwpexit(klwp_t *);
 int	s10_elfexec(vnode_t *, execa_t *, uarg_t *, intpdata_t *, int,
-	long *, int, caddr_t, cred_t *, int);
+	long *, int, caddr_t, cred_t *, int *);
 void	s10_sigset_native_to_s10(sigset_t *);
 void	s10_sigset_s10_to_native(sigset_t *);
 
@@ -77,6 +77,8 @@ struct brand_ops s10_brops = {
 	s10_proc_exit,			/* b_proc_exit */
 	s10_exec,			/* b_exec */
 	lwp_setrval,			/* b_lwp_setrval */
+	NULL,				/* b_lwpdata_alloc */
+	NULL,				/* b_lwpdata_free */
 	s10_initlwp,			/* b_initlwp */
 	s10_forklwp,			/* b_forklwp */
 	s10_freelwp,			/* b_freelwp */
@@ -364,10 +366,10 @@ s10_exec()
 	brand_solaris_exec(&s10_brand);
 }
 
-int
-s10_initlwp(klwp_t *l)
+void
+s10_initlwp(klwp_t *l, void *bd)
 {
-	return (brand_solaris_initlwp(l, &s10_brand));
+	brand_solaris_initlwp(l, &s10_brand);
 }
 
 void
@@ -417,7 +419,7 @@ s10_init_brand_data(zone_t *zone)
 int
 s10_elfexec(vnode_t *vp, execa_t *uap, uarg_t *args, intpdata_t *idatap,
 	int level, long *execsz, int setid, caddr_t exec_file, cred_t *cred,
-	int brand_action)
+	int *brand_action)
 {
 	return (brand_solaris_elfexec(vp, uap, args, idatap, level, execsz,
 	    setid, exec_file, cred, brand_action, &s10_brand, S10_BRANDNAME,

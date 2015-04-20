@@ -261,8 +261,11 @@ static void	die(const char *, ...);
 static void	die_optdup(int);
 static void	die_opterr(int, int, const char *);
 static void	die_dlerr(dladm_status_t, const char *, ...);
+static void	die_dlerrlist(dladm_status_t, dladm_errlist_t *,
+    const char *, ...);
 static void	warn(const char *, ...);
 static void	warn_dlerr(dladm_status_t, const char *, ...);
+static void	warn_dlerrlist(dladm_errlist_t *);
 
 typedef struct	cmd {
 	char		*c_name;
@@ -410,16 +413,16 @@ static cmd_t	cmds[] = {
 	    "    show-bridge      -t [-p] [-o <field>,...] [-s [-i <interval>]]"
 	    " <bridge>\n"						},
 	{ "create-overlay",	do_create_overlay,
-	    "    create-overlay   -e <encap> -s <search> -v <vnetid>\n"
-	    "\t\t     [ -p <prop>=<value>[,...]] <overlay-name>"	},
+	    "    create-overlay   [-t] -e <encap> -s <search> -v <vnetid>\n"
+	    "\t\t     [ -p <prop>=<value>[,...]] <overlay>"	},
 	{ "delete-overlay",	do_delete_overlay,
-	    "    delete-overlay   <overlay-name>"			},
+	    "    delete-overlay   <overlay>"			},
 	{ "modify-overlay",	do_modify_overlay,
-	    "    modify-overlay   [-d mac] [-f] [-s mac=ip:port] "
-	    "<overlay-name>"						},
+	    "    modify-overlay   -d mac | -f | -s mac=ip:port "
+	    "<overlay>"						},
 	{ "show-overlay",	do_show_overlay,
-	    "    show-overlay     [-f | -t] [-p] [-o <field>,...]"
-	    "<overlay> \n"						},
+	    "    show-overlay     [-f | -t] [[-p] -o <field>,...] "
+	    "[<overlay>]\n"						},
 	{ "show-usage",		do_show_usage,
 	    "    show-usage       [-a] [-d | -F <format>] "
 	    "[-s <DD/MM/YYYY,HH:MM:SS>]\n"
@@ -1447,6 +1450,31 @@ static ofmt_field_t bridge_trill_fields[] = {
 { "NEXTHOP",	17,
     offsetof(bridge_trill_fields_buf_t, bridget_nexthop), print_default_cb },
 { NULL,		0, 0, NULL}};
+
+static const struct option overlay_create_lopts[] = {
+	{ "encap",	required_argument,	NULL,	'e' },
+	{ "prop",	required_argument,	NULL,	'p' },
+	{ "search",	required_argument,	NULL,	's' },
+	{ "temporary", 	no_argument,		NULL,	't' },
+	{ "vnetid",	required_argument,	NULL,	'v' },
+	{ NULL,		0,			NULL,	0 }
+};
+
+static const struct option overlay_modify_lopts[] = {
+	{ "delete-entry",	required_argument,	NULL,	'd' },
+	{ "flush-table",	no_argument,		NULL,	'f' },
+	{ "set-entry",		required_argument,	NULL,	's' },
+	{ NULL,			0,			NULL,	0 }
+};
+
+static const struct option overlay_show_lopts[] = {
+	{ "fma",	no_argument,		NULL,	'f' },
+	{ "target",	no_argument,		NULL,	't' },
+	{ "parsable",	no_argument,		NULL,	'p' },
+	{ "parseable",	no_argument,		NULL,	'p' },
+	{ "output",	required_argument,	NULL,	'o' },
+	{ NULL,		0,			NULL,	0 }
+};
 
 /*
  * Structures for dladm show-overlay
@@ -4881,7 +4909,7 @@ do_create_vnic(int argc, char *argv[], const char *use)
 
 	status = dladm_vnic_create(handle, name, dev_linkid, mac_addr_type,
 	    mac_addr, maclen, &mac_slot, mac_prefix_len, vid, vrid, af,
-	    &linkid, proplist, flags);
+	    &linkid, proplist, &errlist, flags);
 	switch (status) {
 	case DLADM_STATUS_OK:
 		break;
@@ -4892,7 +4920,8 @@ do_create_vnic(int argc, char *argv[], const char *use)
 		break;
 
 	default:
-		die_dlerr(status, "vnic creation over %s failed", devname);
+		die_dlerrlist(status, &errlist, "vnic creation over %s failed",
+		    devname);
 	}
 
 	dladm_free_props(proplist);
@@ -5422,7 +5451,7 @@ do_create_etherstub(int argc, char *argv[], const char *use)
 
 	status = dladm_vnic_create(handle, name, DATALINK_INVALID_LINKID,
 	    VNIC_MAC_ADDR_TYPE_AUTO, mac_addr, ETHERADDRL, NULL, 0, 0,
-	    VRRP_VRID_NONE, AF_UNSPEC, NULL, NULL, flags);
+	    VRRP_VRID_NONE, AF_UNSPEC, NULL, NULL, &errlist, flags);
 	if (status != DLADM_STATUS_OK)
 		die_dlerr(status, "etherstub creation failed");
 }
@@ -9081,6 +9110,21 @@ warn_dlerr(dladm_status_t err, const char *format, ...)
 	(void) fprintf(stderr, ": %s\n", dladm_status2str(err, errmsg));
 }
 
+static void
+warn_dlerrlist(dladm_errlist_t *errlist)
+{
+	if (errlist != NULL && errlist->el_count > 0) {
+		int i;
+		for (i = 0; i < errlist->el_count; i++) {
+			(void) fprintf(stderr, gettext("%s: warning: "),
+			    progname);
+
+			(void) fprintf(stderr, "%s\n",
+			    gettext(errlist->el_errs[i]));
+		}
+	}
+}
+
 /*
  * Also closes the dladm handle if it is not NULL.
  */
@@ -9104,6 +9148,34 @@ die_dlerr(dladm_status_t err, const char *format, ...)
 		dladm_close(handle);
 
 	exit(EXIT_FAILURE);
+}
+
+/*
+ * Like die_dlerr, but uses the errlist for additional information.
+ */
+/* PRINTFLIKE3 */
+static void
+die_dlerrlist(dladm_status_t err, dladm_errlist_t *errlist,
+    const char *format, ...)
+{
+	va_list	alist;
+	char	errmsg[DLADM_STRSIZE];
+
+	warn_dlerrlist(errlist);
+	format = gettext(format);
+	(void) fprintf(stderr, "%s: ", progname);
+
+	va_start(alist, format);
+	(void) vfprintf(stderr, format, alist);
+	va_end(alist);
+	(void) fprintf(stderr, ": %s\n", dladm_status2str(err, errmsg));
+
+	/* close dladm handle if it was opened */
+	if (handle != NULL)
+		dladm_close(handle);
+
+	exit(EXIT_FAILURE);
+
 }
 
 /* PRINTFLIKE1 */
@@ -9844,20 +9916,24 @@ do_create_overlay(int argc, char *argv[], const char *use)
 	char			*encap = NULL, *endp, *search = NULL;
 	char			name[MAXLINKNAMELEN];
 	dladm_status_t		status;
-	uint32_t		flags = DLADM_OPT_ACTIVE | DLADM_OPT_TRANSIENT;
+	uint32_t		flags = DLADM_OPT_ACTIVE | DLADM_OPT_PERSIST;
 	uint64_t		vid;
 	boolean_t		havevid = B_FALSE;
 	char			propstr[DLADM_STRSIZE];
 	dladm_arg_list_t	*proplist = NULL;
 
 	bzero(propstr, sizeof (propstr));
-	while ((opt = getopt(argc, argv, ":e:v:p:s:")) != -1) {
+	while ((opt = getopt_long(argc, argv, ":te:v:p:s:",
+	    overlay_create_lopts, NULL)) != -1) {
 		switch (opt) {
 		case 'e':
 			encap = optarg;
 			break;
 		case 's':
 			search = optarg;
+			break;
+		case 't':
+			flags &= ~DLADM_OPT_PERSIST;
 			break;
 		case 'p':
 			(void) strlcat(propstr, optarg, DLADM_STRSIZE);
@@ -9912,10 +9988,7 @@ do_create_overlay(int argc, char *argv[], const char *use)
 	    proplist, &errlist, flags);
 	dladm_free_props(proplist);
 	if (status != DLADM_STATUS_OK) {
-		int i;
-		for (i = 0; i < errlist.el_count; i++)
-			(void) fprintf(stderr, "%s\n", errlist.el_errs[i]);
-		die_dlerr(status, "overlay creation failed");
+		die_dlerrlist(status, &errlist, "overlay creation failed");
 	}
 }
 
@@ -10169,11 +10242,7 @@ show_one_overlay(dladm_handle_t hdl, datalink_id_t linkid, void *arg)
 	dladm_errlist_reset(&errlist);
 	(void) dladm_overlay_walk_prop(handle, linkid, dladm_overlay_show_one,
 	    &state, &errlist);
-	if (errlist.el_count != 0) {
-		int i;
-		for (i = 0; i < errlist.el_count; i++)
-			(void) fprintf(stderr, "%s\n", errlist.el_errs[i]);
-	}
+	warn_dlerrlist(&errlist);
 
 	return (DLADM_WALK_CONTINUE);
 }
@@ -10372,7 +10441,8 @@ do_show_overlay(int argc, char *argv[], const char *use)
 	fieldsp = overlay_fields;
 	parse = B_FALSE;
 	ofmtflags = OFMT_WRAP;
-	while ((opt = getopt(argc, argv, ":o:pft")) != -1) {
+	while ((opt = getopt_long(argc, argv, ":o:pft", overlay_show_lopts,
+	    NULL)) != -1) {
 		switch (opt) {
 		case 'f':
 			funcp = show_one_overlay_fma;
@@ -10434,7 +10504,8 @@ do_modify_overlay(int argc, char *argv[], const char *use)
 	dladm_status_t		status;
 
 	flush = set = delete = B_FALSE;
-	while ((opt = getopt(argc, argv, ":fd:s:")) != -1) {
+	while ((opt = getopt_long(argc, argv, ":fd:s:", overlay_modify_lopts,
+	    NULL)) != -1) {
 		switch (opt) {
 		case 'd':
 			if (delete == B_TRUE)

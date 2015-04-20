@@ -53,12 +53,12 @@ int	sn1_brandsys(int, int64_t *, uintptr_t, uintptr_t, uintptr_t,
 void	sn1_copy_procdata(proc_t *, proc_t *);
 void	sn1_proc_exit(struct proc *);
 void	sn1_exec();
-int	sn1_initlwp(klwp_t *);
+void	sn1_initlwp(klwp_t *, void *);
 void	sn1_forklwp(klwp_t *, klwp_t *);
 void	sn1_freelwp(klwp_t *);
 void	sn1_lwpexit(klwp_t *);
 int	sn1_elfexec(vnode_t *, execa_t *, uarg_t *, intpdata_t *, int,
-	long *, int, caddr_t, cred_t *, int);
+	long *, int, caddr_t, cred_t *, int *);
 
 /* sn1 brand */
 struct brand_ops sn1_brops = {
@@ -72,6 +72,8 @@ struct brand_ops sn1_brops = {
 	sn1_proc_exit,			/* b_proc_exit */
 	sn1_exec,			/* b_exec */
 	lwp_setrval,			/* b_lwp_setrval */
+	NULL,				/* b_lwpdata_alloc */
+	NULL,				/* b_lwpdata_free */
 	sn1_initlwp,			/* b_initlwp */
 	sn1_forklwp,			/* b_forklwp */
 	sn1_freelwp,			/* b_freelwp */
@@ -209,10 +211,10 @@ sn1_exec()
 	brand_solaris_exec(&sn1_brand);
 }
 
-int
-sn1_initlwp(klwp_t *l)
+void
+sn1_initlwp(klwp_t *l, void *bd)
 {
-	return (brand_solaris_initlwp(l, &sn1_brand));
+	brand_solaris_initlwp(l, &sn1_brand);
 }
 
 void
@@ -248,7 +250,7 @@ sn1_init_brand_data(zone_t *zone)
 int
 sn1_elfexec(vnode_t *vp, execa_t *uap, uarg_t *args, intpdata_t *idatap,
 	int level, long *execsz, int setid, caddr_t exec_file, cred_t *cred,
-	int brand_action)
+	int *brand_action)
 {
 	return (brand_solaris_elfexec(vp, uap, args, idatap, level, execsz,
 	    setid, exec_file, cred, brand_action, &sn1_brand, SN1_BRANDNAME,

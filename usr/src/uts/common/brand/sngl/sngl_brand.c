@@ -54,12 +54,12 @@ int	sngl_brandsys(int, int64_t *, uintptr_t, uintptr_t, uintptr_t,
 void	sngl_copy_procdata(proc_t *, proc_t *);
 void	sngl_proc_exit(struct proc *);
 void	sngl_exec();
-int	sngl_initlwp(klwp_t *);
+void	sngl_initlwp(klwp_t *, void *);
 void	sngl_forklwp(klwp_t *, klwp_t *);
 void	sngl_freelwp(klwp_t *);
 void	sngl_lwpexit(klwp_t *);
 int	sngl_elfexec(vnode_t *, execa_t *, uarg_t *, intpdata_t *, int,
-	long *, int, caddr_t, cred_t *, int);
+	long *, int, caddr_t, cred_t *, int *);
 
 /* SNGL brand */
 struct brand_ops sngl_brops = {
@@ -73,6 +73,8 @@ struct brand_ops sngl_brops = {
 	sngl_proc_exit,			/* b_proc_exit */
 	sngl_exec,			/* b_exec */
 	lwp_setrval,			/* b_lwp_setrval */
+	NULL,				/* b_lwpdata_alloc */
+	NULL,				/* b_lwpdata_free */
 	sngl_initlwp,			/* b_initlwp */
 	sngl_forklwp,			/* b_forklwp */
 	sngl_freelwp,			/* b_freelwp */
@@ -195,10 +197,10 @@ sngl_exec()
 	brand_solaris_exec(&sngl_brand);
 }
 
-int
-sngl_initlwp(klwp_t *l)
+void
+sngl_initlwp(klwp_t *l, void *bd)
 {
-	return (brand_solaris_initlwp(l, &sngl_brand));
+	brand_solaris_initlwp(l, &sngl_brand);
 }
 
 void
@@ -232,7 +234,7 @@ sngl_init_brand_data(zone_t *zone)
 int
 sngl_elfexec(vnode_t *vp, execa_t *uap, uarg_t *args, intpdata_t *idatap,
 	int level, long *execsz, int setid, caddr_t exec_file, cred_t *cred,
-	int brand_action)
+	int *brand_action)
 {
 	return (brand_solaris_elfexec(vp, uap, args, idatap, level, execsz,
 	    setid, exec_file, cred, brand_action, &sngl_brand, SNGL_BRANDNAME,

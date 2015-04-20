@@ -147,7 +147,6 @@
 #include <sys/machbrand.h>
 #include <sys/lx_syscalls.h>
 #include <sys/lx_misc.h>
-#include <sys/lx_pid.h>
 #include <sys/lx_futex.h>
 #include <sys/lx_brand.h>
 #include <sys/param.h>
@@ -169,6 +168,7 @@
 #include <sys/core.h>
 #include <sys/stack.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <lx_signum.h>
 
 int	lx_debug = 0;
@@ -212,7 +212,7 @@ uint64_t lx_maxstack64 = LX_MAXSTACK64;
 
 static int lx_elfexec(struct vnode *vp, struct execa *uap, struct uarg *args,
     struct intpdata *idata, int level, long *execsz, int setid,
-    caddr_t exec_file, struct cred *cred, int brand_action);
+    caddr_t exec_file, struct cred *cred, int *brand_action);
 
 static boolean_t lx_native_exec(uint8_t, const char **);
 static uint32_t lx_map32limit(proc_t *);
@@ -243,6 +243,8 @@ struct brand_ops lx_brops = {
 	lx_proc_exit,			/* b_proc_exit */
 	lx_exec,			/* b_exec */
 	lx_setrval,			/* b_lwp_setrval */
+	lx_lwpdata_alloc,		/* b_lwpdata_alloc */
+	lx_lwpdata_free,		/* b_lwpdata_free */
 	lx_initlwp,			/* b_initlwp */
 	lx_forklwp,			/* b_forklwp */
 	lx_freelwp,			/* b_freelwp */
@@ -312,22 +314,8 @@ lx_proc_exit(proc_t *p)
 void
 lx_setbrand(proc_t *p)
 {
-	kthread_t *t = p->p_tlist;
-	int err;
-
-	ASSERT(p->p_brand_data == NULL);
-	ASSERT(ttolxlwp(curthread) == NULL);
-
-	p->p_brand_data = kmem_zalloc(sizeof (struct lx_proc_data), KM_SLEEP);
+	/* Send SIGCHLD to parent by default when child exits */
 	ptolxproc(p)->l_signal = stol_signo[SIGCHLD];
-
-	/*
-	 * This routine can only be called for single-threaded processes.
-	 * Since lx_initlwp() can only fail if we run out of PIDs for
-	 * multithreaded processes, we know that this can never fail.
-	 */
-	err = lx_initlwp(t->t_lwp);
-	ASSERT(err == 0);
 }
 
 /* ARGSUSED */
@@ -561,12 +549,15 @@ lx_restorecontext(ucontext_t *ucp)
 
 #if defined(__amd64)
 	/*
-	 * Override the fsbase in the context with the value provided through
-	 * the Linux arch_prctl(2) system call.
+	 * Override the fs/gsbase in the context with the value provided
+	 * through the Linux arch_prctl(2) system call.
 	 */
 	if (flags & LX_UC_STACK_BRAND) {
 		if (lwpd->br_lx_fsbase != 0) {
 			ucp->uc_mcontext.gregs[REG_FSBASE] = lwpd->br_lx_fsbase;
+		}
+		if (lwpd->br_lx_gsbase != 0) {
+			ucp->uc_mcontext.gregs[REG_GSBASE] = lwpd->br_lx_gsbase;
 		}
 	}
 #endif
@@ -691,6 +682,15 @@ lx_init_brand_data(zone_t *zone)
 	 * This can be changed by a call to setattr() during zone boot.
 	 */
 	(void) strlcpy(data->lxzd_kernel_version, "2.4.21", LX_VERS_MAX);
+
+	/*
+	 * Linux is not at all picky about address family when it comes to
+	 * supporting interface-related ioctls.  To mimic this behavior, we'll
+	 * attempt those ioctls against a ksocket configured for that purpose.
+	 */
+	(void) ksocket_socket(&data->lxzd_ioctl_sock, AF_INET, SOCK_DGRAM, 0,
+	    0, zone->zone_kcred);
+
 	zone->zone_brand_data = data;
 
 	/*
@@ -703,7 +703,18 @@ lx_init_brand_data(zone_t *zone)
 void
 lx_free_brand_data(zone_t *zone)
 {
-	kmem_free(zone->zone_brand_data, sizeof (lx_zone_data_t));
+	lx_zone_data_t *data = ztolxzd(zone);
+	ASSERT(data != NULL);
+	if (data->lxzd_ioctl_sock != NULL) {
+		/*
+		 * Since zone_kcred has been cleaned up already, close the
+		 * socket using the global kcred.
+		 */
+		ksocket_close(data->lxzd_ioctl_sock, kcred);
+		data->lxzd_ioctl_sock = NULL;
+	}
+	zone->zone_brand_data = NULL;
+	kmem_free(data, sizeof (*data));
 }
 
 void
@@ -1308,17 +1319,15 @@ lx_setid_clear(vattr_t *vap, cred_t *cr)
 void
 lx_copy_procdata(proc_t *child, proc_t *parent)
 {
-	lx_proc_data_t *cpd, *ppd;
+	lx_proc_data_t *cpd = child->p_brand_data;
+	lx_proc_data_t *ppd = parent->p_brand_data;
 
-	ppd = parent->p_brand_data;
+	VERIFY(parent->p_brand == &lx_brand);
+	VERIFY(child->p_brand == &lx_brand);
+	VERIFY(ppd != NULL);
+	VERIFY(cpd != NULL);
 
-	ASSERT(ppd != NULL);
-	ASSERT(parent->p_brand == &lx_brand);
-
-	cpd = kmem_alloc(sizeof (lx_proc_data_t), KM_SLEEP);
 	*cpd = *ppd;
-
-	child->p_brand_data = cpd;
 
 	cpd->l_fake_limits[LX_RLFAKE_LOCKS].rlim_cur = LX_RLIM64_INFINITY;
 	cpd->l_fake_limits[LX_RLFAKE_LOCKS].rlim_max = LX_RLIM64_INFINITY;
@@ -1366,10 +1375,10 @@ restoreexecenv(struct execenv *ep, stack_t *sp)
 }
 
 extern int elfexec(vnode_t *, execa_t *, uarg_t *, intpdata_t *, int,
-    long *, int, caddr_t, cred_t *, int);
+    long *, int, caddr_t, cred_t *, int *);
 
 extern int elf32exec(struct vnode *, execa_t *, uarg_t *, intpdata_t *, int,
-    long *, int, caddr_t, cred_t *, int);
+    long *, int, caddr_t, cred_t *, int *);
 
 /*
  * Exec routine called by elfexec() to load either 32-bit or 64-bit Linux
@@ -1378,7 +1387,7 @@ extern int elf32exec(struct vnode *, execa_t *, uarg_t *, intpdata_t *, int,
 static int
 lx_elfexec(struct vnode *vp, struct execa *uap, struct uarg *args,
     struct intpdata *idata, int level, long *execsz, int setid,
-    caddr_t exec_file, struct cred *cred, int brand_action)
+    caddr_t exec_file, struct cred *cred, int *brand_action)
 {
 	int		error;
 	vnode_t		*nvp;

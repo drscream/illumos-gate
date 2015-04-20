@@ -24,7 +24,7 @@
  */
 
 /*
- * Copyright 2015 Joyent, Inc. All rights reserved.
+ * Copyright 2015 Joyent, Inc.
  */
 
 #ifndef _LX_BRAND_H
@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <sys/cpuvar.h>
 #include <sys/zone.h>
+#include <sys/ksocket.h>
 #endif
 
 #ifdef	__cplusplus
@@ -498,6 +499,16 @@ typedef enum lx_stack_mode {
 	LX_STACK_MODE_BRAND
 } lx_stack_mode_t;
 
+struct lx_pid {
+	pid_t	s_pid;			/* the SunOS pid and ... */
+	id_t	s_tid;			/* ... tid pair */
+	pid_t	l_pid;			/* the corresponding linux pid */
+	time_t	l_start;		/* birthday of this pid */
+	struct pid *l_pidp;
+	struct lx_pid *stol_next;	/* link in stol hash table */
+	struct lx_pid *ltos_next;	/* link in ltos hash table */
+};
+
 /*
  * lx-specific data in the klwp_t
  */
@@ -513,12 +524,15 @@ struct lx_lwp_data {
 			/* descriptors used by libc for TLS */
 	ulong_t	br_lx_fsbase;		/* lx fsbase for 64-bit thread ptr */
 	ulong_t	br_ntv_fsbase;		/* native fsbase 64-bit thread ptr */
+	ulong_t	br_lx_gsbase;		/* lx user-land gsbase */
+	ulong_t	br_ntv_gsbase;		/* native user-land gsbase */
 	pid_t	br_pid;			/* converted pid for this thread */
 	pid_t	br_tgid;		/* thread group ID for this thread */
 	pid_t	br_ppid;		/* parent pid for this thread */
 	id_t	br_ptid;		/* parent tid for this thread */
 	void	*br_clear_ctidp;	/* clone thread id ptr */
 	void	*br_set_ctidp;		/* clone thread id ptr */
+	void	*br_robust_list;	/* robust lock list, if any */
 
 	/*
 	 * The following struct is used by some system calls to pass extra
@@ -576,6 +590,11 @@ struct lx_lwp_data {
 	 * usermode.
 	 */
 	boolean_t br_strict_failure;
+
+	/*
+	 * Hold a pre-allocated lx_pid structure to be used during lx_initlwp.
+	 */
+	struct lx_pid *br_lpid;
 };
 
 /*
@@ -587,6 +606,7 @@ struct lx_lwp_data {
 /* brand specific data */
 typedef struct lx_zone_data {
 	char lxzd_kernel_version[LX_VERS_MAX];
+	ksocket_t lxzd_ioctl_sock;
 } lx_zone_data_t;
 
 #define	BR_CPU_BOUND	0x0001
@@ -599,6 +619,9 @@ typedef struct lx_zone_data {
 #define	ptolxproc(p)	\
 	(((p)->p_brand == &lx_brand) ? \
 	(struct lx_proc_data *)(p)->p_brand_data : NULL)
+#define	ztolxzd(z)		\
+	(((z)->zone_brand == &lx_brand) ?  \
+	(lx_zone_data_t *)(z)->zone_brand_data : NULL)
 
 /* Macro for converting to system call arguments. */
 #define	LX_ARGS(scall) ((struct lx_##scall##_args *)\
@@ -639,6 +662,14 @@ extern void lx_emulate_user32(klwp_t *, int, uintptr_t *);
 
 extern int lx_debug;
 #define	lx_print	if (lx_debug) printf
+
+extern void lx_pid_assign(kthread_t *, struct lx_pid *);
+extern void lx_pid_reassign(kthread_t *);
+extern void lx_pid_rele(pid_t, id_t);
+extern pid_t lx_lpid_to_spair(pid_t, pid_t *, id_t *);
+extern pid_t lx_lwp_ppid(klwp_t *, pid_t *, id_t *);
+extern void lx_pid_init(void);
+extern void lx_pid_fini(void);
 
 /*
  * In-Kernel Linux System Call Description.
