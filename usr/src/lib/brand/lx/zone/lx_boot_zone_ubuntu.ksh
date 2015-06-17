@@ -11,209 +11,64 @@
 #
 
 #
-# Copyright 2015 Joyent, Inc.  All rights reserved.
+# Copyright 2015 Joyent, Inc.
 #
 
 #
 # Customisation for Ubuntu-based distributions.  Assumes to have been
 # sourced from lx_boot.
 #
+tmpfile=/tmp/lx-ubuntu.$$
 
-# Generate the networking.conf upstart script 
-setup_net()
-{
-    zonecfg -z $ZONENAME info net >/tmp/$ZONENAME.$$
-    zonecfg -z $ZONENAME info attr name=resolvers >>/tmp/$ZONENAME.$$
+# Check that the directories we're writing to aren't symlinks outside the zone
+safe_dir /etc
+safe_dir /etc/init
+safe_dir /etc/resolvconf
+safe_dir /etc/resolvconf/resolv.conf.d
+safe_dir /etc/network
+safe_dir /etc/network/interfaces.d
+safe_dir /etc/network/interfaces.d/smartos
 
-   awk '
-        BEGIN {
-            printf("description\t\"configure virtual network devices\"\n\n")
-            printf("emits static-network-up\n")
-	    printf("emits net-device-up\n\n")
-
-	    printf("start on local-filesystems\n\n")
-
-	    printf("task\n\n")
-
-	    printf("pre-start exec mkdir -p /run/network\n\n")
-
-	    printf("script\n")
-	    printf("    /sbin/ipmgmtd || true\n")
-	    printf("    /sbin/ifconfig-native lo0 plumb\n")
-	    printf("    /sbin/ifconfig-native lo0 up\n")
-	    printf("    /sbin/ifconfig-native lo0 inet6 plumb\n")
-	    printf("    /sbin/ifconfig-native lo0 inet6 up\n")
-	    printf("    /sbin/initctl emit --no-wait net-device-up IFACE=lo LOGICAL=lo ADDRFAM=inet METHOD=loopback || true\n")
-
-        } {
-            if ($1 == "net:") {
-                in_net = 1
-                in_attr = 0
-
-                if (phys != "") {
-                    printf("    /sbin/ifconfig-native %s plumb || true\n", phys)
-                    printf("    /sbin/ifconfig-native %s %s netmask %s up || true\n",
-                        phys, ip, mask)
-                    printf("    /sbin/ifconfig-native %s inet6 plumb up || true\n", phys)
-                    if (prim == "true" && length(gw) > 0)
-		        printf("    /sbin/route add default %s || true\n", gw)
-                    printf("    /sbin/initctl emit --no-wait net-device-up IFACE=%s\n",
-                        phys)
-
-                    phys = ""
-                    prim = ""
-                    gw = ""
-                    ip = ""
-                    mask = ""
-                }
-                next
-
-            } else if ($1 == "attr:") {
-                in_net = 0
-                in_attr = 1
-                next
-            }
-
-            if (in_net == 1) {
-                if ($1 == "physical:") {
-                    phys = $2
-                } else if ($1 == "property:") {
-                    split($2, a, ",")
-                    split(a[1], k, "=")
-                    split(a[2], v, "=")
-
-                    val = substr(v[2], 2)
-                    val = substr(val, 1, length(val) - 2)
-
-                    if (k[2] == "ip")
-                        ip = val
-                    else if (k[2] == "netmask")
-                        mask = val
-                    else if (k[2] == "primary")
-                        prim = val
-                    else if (k[2] == "gateway")
-                        gw = val
-                }
-
-            } else if (in_attr == 1) {
-                if ($1 == "value:") {
-                    nres = split($2, resolvers, ",")
-                }
-            }
-        }
-        END {
-	    printf("    /sbin/ifconfig-native %s plumb || true\n", phys)
-	    printf("    /sbin/ifconfig-native %s %s netmask %s up || true\n",
-		phys, ip, mask)
-	    printf("    /sbin/ifconfig-native %s inet6 plumb up || true\n", phys)
-            if (prim == "true" && length(gw) > 0)
-	        printf("    /sbin/route add default %s || true\n", gw)
-	    printf("    /sbin/initctl emit --no-wait net-device-up IFACE=%s\n",
-		phys)
-
-	    printf("    /sbin/initctl emit --no-wait static-network-up\n")
-
-            for (i = 1; i <= nres; i++)
-                printf("    echo \"nameserver %s\" >> %s\n", resolvers[i],
-                    "/run/resolvconf/resolv.conf")
-
-	    printf("end script\n")
-        }' /tmp/$ZONENAME.$$ > $fnm
-
-        rm -f /tmp/$ZONENAME.$$
+# Populate resolve.conf setup files
+zonecfg -z $ZONENAME info attr name=resolvers | awk '
+BEGIN {
+	print("# AUTOMATIC ZONE CONFIG")
 }
-
-disable_svc()
-{
-	fnm=$ZONEROOT/etc/init/$1.override
-	[[ -h $fnm || -f $fnm ]] && return
-	echo "manual" > $fnm
+$1 == "value:" {
+	nres = split($2, resolvers, ",");
+	for (i = 1; i <= nres; i++) {
+		print("nameserver", resolvers[i]);
+	}
 }
-
-
-RMSVCS="acpid
-	alsa-restore
-	alsa-state
-	alsa-store
-	avahi-cups-reload
-	avahi-daemon
-	bluetooth
-	bootmisc.sh
-	checkroot.sh
-	cloud-init-blocknet
-	cloud-init-container
-	cloud-init-nonet
-	control-alt-delete
-	console-setup
-	dmesg
-	hwclock
-	hwclock-save
-	irqbalance
-	lightdm
-	modemmanager
-	module-init-tools
-	mountdevsubfs.sh
-	mounted-dev
-	mounted-debugfs
-	mountkernfs.sh
-	mtab.sh
-	network-interface-security
-	network-manager
-	plymouth
-	plymouth-log
-	plymouth-splash
-	plymouth-stop
-	plymouth-upstart-bridge
-	pulseaudio
-	setvtrgb
-	systemd-logind
-	tty1
-	tty2
-	tty3
-	tty4
-	tty5
-	tty6
-	upstart-udev-bridge
-	udev
-	udevmonitor
-	udevtrigger
-	udev-fallback-graphics
-	udev-finish
-	ureadahead-other
-	ureadahead
-	whoopsie"
-
-
-#
-# Now customize upstart
-#
-
-for f in $RMSVCS
-do
-	disable_svc $f
-done
-
-# remove these?
-# etc/init.d
-#    networking
-#    umountfs
-
-RMSVCS="kerneloops"
-
-for f in $RMSVCS
-do
-	fnm=$ZONEROOT/etc/init.d/$f
-	[[ ! -h $fnm && -f $fnm ]] && rm -f $fnm
-done
-
-fnm=$ZONEROOT/etc/init/console.conf
-if [[ ! -h $fnm && -f $fnm ]] then
-	sed -e 's/lxc/zones/' $fnm > /tmp/console.conf.$$
-	mv /tmp/console.conf.$$ $fnm
+' > $tmpfile
+fnm=$ZONEROOT/etc/resolvconf/resolv.conf.d/tail
+if [[ -f $fnm || -h $fnm || ! -e $fnm ]]; then
+	mv -f $tmpfile $fnm
 fi
 
-fnm=$ZONEROOT/etc/init/container-detect.conf
-if [[ ! -h $fnm && -f $fnm ]] then
+# Override network configuration
+zonecfg -z $ZONENAME info net | awk '
+BEGIN {
+	print("# AUTOMATIC ZONE CONFIG")
+}
+$1 == "physical:" {
+	print("iface", $2, "inet manual");
+}
+' > $tmpfile
+fnm=$ZONEROOT/etc/network/interfaces.d/smartos
+if [[ -f $fnm || -h $fnm ]]; then
+	mv -f $tmpfile $fnm
+fi
+
+src_fnm=$ZONEROOT/etc/init/console.conf
+tgt_fnm=$ZONEROOT/etc/init/console.override
+if [[ -f $src_fnm && ! -f $tgt_fnm && ! -h $tgt_fnm ]] then
+	sed -e 's/lxc/smartos/' $src_fnm > /tmp/console.conf.$$
+	mv /tmp/console.conf.$$ $tgt_fnm
+fi
+
+fnm=$ZONEROOT/etc/init/container-detect.override
+if [[ ! -f $fnm && ! -h $fnm ]] then
 	cat <<'DONE' > $fnm
 description "Track if upstart is running in a container"
 
@@ -225,7 +80,7 @@ env LIBVIRT_LXC_UUID
 emits container
 
 pre-start script
-    container=zones
+    container=smartos
     echo "$container" > /run/container_type || true
     initctl emit --no-wait container CONTAINER=$container
     exit 0
@@ -233,10 +88,16 @@ end script
 DONE
 fi
 
+# udev-bridge currently aborts and drops core due to missing AF_NETLINK support
+fnm=$ZONEROOT/etc/init/upstart-udev-bridge.override
+if [[ ! -f $fnm && ! -h $fnm ]] then
+	echo "manual" > $fnm
+fi
+
 # XXX need to add real mounting into this svc definition
 
-fnm=$ZONEROOT/etc/init/mountall.conf
-if [[ ! -h $fnm && -f $fnm ]] then
+fnm=$ZONEROOT/etc/init/mountall.override
+if [[ ! -f $fnm && ! -h $fnm ]] then
 	cat <<'DONE' > $fnm
 description	"Mount filesystems on boot"
 
@@ -268,50 +129,9 @@ end script
 DONE
 fi
 
-iptype=`/usr/sbin/zonecfg -z $ZONENAME info ip-type | cut -f2 -d' '`
-
-if [[ "$iptype" == "exclusive" ]]; then
-	fnm=$ZONEROOT/etc/init/networking.conf
-	if [[ ! -h $fnm && -f $fnm ]] then
-		setup_net
-	fi
-fi
-
-fnm=$ZONEROOT/etc/init/ssh.conf
-if [[ ! -h $fnm && -f $fnm && ! -h $ZONEROOT/etc/init/ssh.conf.$$ ]] then
-    awk '{
-        if (substr($0, "start on", 8) == "start on") {
-            print "start on static-network-up"
-        } else if ($0 == "env SSH_SIGSTOP=1") {
-            print "# env SSH_SIGSTOP=1"
-        } else if ($0 == "expect stop") {
-            print "# expect stop"
-        } else {
-            print $0
-        }
-    }' $fnm >$ZONEROOT/etc/init/ssh.conf.$$
-    mv $ZONEROOT/etc/init/ssh.conf.$$ $fnm
-fi
-
-fnm=$ZONEROOT/etc/init/plymouth-ready.conf
-if [[ ! -h $fnm && -f $fnm ]] then
-	cat <<'DONE' > $fnm
-description "Send an event to indicate plymouth is up"
-
-task
-start on startup
-instance $UPSTART_EVENTS
-
-emits plymouth-ready
-
-script
-  initctl emit --no-wait plymouth-ready
-end script
-DONE
-fi
-
 #
-# upstart modifications are complete 
+# upstart modifications are complete
 #
+rm -f $tmpfile
 
 # Hand control back to lx_boot

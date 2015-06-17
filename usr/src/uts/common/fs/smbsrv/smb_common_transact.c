@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+ * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
  */
 
 #include <smbsrv/smb_kproto.h>
@@ -762,7 +762,7 @@ smb_encode_SHARE_INFO_2(struct mbuf_chain *output, struct mbuf_chain *text,
 	(void) smb_mbc_encodef(output, "wwwl9c.",
 	    access,
 	    sr->sr_cfg->skc_maxconnections,
-	    smb_server_get_session_count(),
+	    smb_server_get_session_count(sr->sr_server),
 	    MBC_LENGTH(text),
 	    pword);
 	(void) smb_mbc_encodef(text, "s", path);
@@ -837,7 +837,7 @@ smb_trans_net_share_enum(struct smb_request *sr, struct smb_xa *xa)
 
 	esi.es_buf = smb_srm_zalloc(sr, esi.es_bufsize);
 	esi.es_posix_uid = crgetuid(sr->uid_user->u_cred);
-	smb_kshare_enum(&esi);
+	smb_kshare_enum(sr->sr_server, &esi);
 
 	/* client buffer size is not big enough to hold any shares */
 	if (esi.es_nsent == 0) {
@@ -964,12 +964,12 @@ smb_trans_net_share_getinfo(smb_request_t *sr, struct smb_xa *xa)
 	    &share, &level, &max_bytes) != 0)
 		return (SDRC_NOT_IMPLEMENTED);
 
-	si = smb_kshare_lookup(share);
+	si = smb_kshare_lookup(sr->sr_server, share);
 	if ((si == NULL) || (si->shr_oemname == NULL)) {
 		(void) smb_mbc_encodef(&xa->rep_param_mb, "www",
 		    NERR_NetNameNotFound, 0, 0);
 		if (si)
-			smb_kshare_release(si);
+			smb_kshare_release(sr->sr_server, si);
 		return (SDRC_SUCCESS);
 	}
 
@@ -996,14 +996,14 @@ smb_trans_net_share_getinfo(smb_request_t *sr, struct smb_xa *xa)
 		break;
 
 	default:
-		smb_kshare_release(si);
+		smb_kshare_release(sr->sr_server, si);
 		(void) smb_mbc_encodef(&xa->rep_param_mb, "www",
 		    ERROR_INVALID_LEVEL, 0, 0);
 		m_freem(str_mb.chain);
 		return (SDRC_NOT_IMPLEMENTED);
 	}
 
-	smb_kshare_release(si);
+	smb_kshare_release(sr->sr_server, si);
 	(void) smb_mbc_encodef(&xa->rep_param_mb, "www", NERR_Success,
 	    -MBC_LENGTH(&xa->rep_data_mb),
 	    MBC_LENGTH(&xa->rep_data_mb) + MBC_LENGTH(&str_mb));
@@ -1383,16 +1383,85 @@ is_supported_mailslot(const char *mailslot)
 }
 
 /*
- * Currently, just return false if the pipe is \\PIPE\repl.
- * Otherwise, return true.
+ * smb_trans_nmpipe
+ *
+ * This is used for RPC bind and request transactions.
+ *
+ * If the data available from the pipe is larger than the maximum
+ * data size requested by the client, return as much as requested.
+ * The residual data remains in the pipe until the client comes back
+ * with a read request or closes the pipe.
+ *
+ * When we read less than what's available, we MUST return the
+ * status NT_STATUS_BUFFER_OVERFLOW (or ERRDOS/ERROR_MORE_DATA)
  */
-static boolean_t
-is_supported_pipe(const char *pname)
+static smb_sdrc_t
+smb_trans_nmpipe(smb_request_t *sr, smb_xa_t *xa)
 {
-	if (smb_strcasecmp(pname, PIPE_REPL, 0) == 0)
-		return (B_FALSE);
+	smb_vdb_t	vdb;
+	struct mbuf	*mb;
+	int rc;
 
-	return (B_TRUE);
+	smbsr_lookup_file(sr);
+	if (sr->fid_ofile == NULL) {
+		smbsr_error(sr, NT_STATUS_INVALID_HANDLE,
+		    ERRDOS, ERRbadfid);
+		return (SDRC_ERROR);
+	}
+
+	rc = smb_mbc_decodef(&xa->req_data_mb, "#B",
+	    xa->smb_tdscnt, &vdb);
+	if (rc != 0) {
+		/* Not enough data sent. */
+		smbsr_error(sr, 0, ERRSRV, ERRerror);
+		return (SDRC_ERROR);
+	}
+
+	rc = smb_opipe_write(sr, &vdb.vdb_uio);
+	if (rc != 0) {
+		smbsr_errno(sr, rc);
+		return (SDRC_ERROR);
+	}
+
+	vdb.vdb_tag = 0;
+	vdb.vdb_uio.uio_iov = &vdb.vdb_iovec[0];
+	vdb.vdb_uio.uio_iovcnt = MAX_IOVEC;
+	vdb.vdb_uio.uio_segflg = UIO_SYSSPACE;
+	vdb.vdb_uio.uio_extflg = UIO_COPY_DEFAULT;
+	vdb.vdb_uio.uio_loffset = (offset_t)0;
+	vdb.vdb_uio.uio_resid = xa->smb_mdrcnt;
+	mb = smb_mbuf_allocate(&vdb.vdb_uio);
+
+	rc = smb_opipe_read(sr, &vdb.vdb_uio);
+	if (rc != 0) {
+		m_freem(mb);
+		smbsr_errno(sr, rc);
+		return (SDRC_ERROR);
+	}
+
+	smb_mbuf_trim(mb, xa->smb_mdrcnt - vdb.vdb_uio.uio_resid);
+	MBC_ATTACH_MBUF(&xa->rep_data_mb, mb);
+
+	/*
+	 * If the output buffer holds a partial pipe message,
+	 * we're supposed to return NT_STATUS_BUFFER_OVERFLOW.
+	 * As we don't have message boundary markers, the best
+	 * we can do is return that status when we have ALL of:
+	 *	Output buffer was < SMB_PIPE_MAX_MSGSIZE
+	 *	We filled the output buffer (resid==0)
+	 *	There's more data (ioctl FIONREAD)
+	 */
+	if (xa->smb_mdrcnt < SMB_PIPE_MAX_MSGSIZE &&
+	    vdb.vdb_uio.uio_resid == 0) {
+		int nread = 0;
+		rc = smb_opipe_get_nread(sr, &nread);
+		if (rc == 0 && nread != 0) {
+			smbsr_status(sr, NT_STATUS_BUFFER_OVERFLOW,
+			    ERRDOS, ERROR_MORE_DATA);
+		}
+	}
+
+	return (SDRC_SUCCESS);
 }
 
 static smb_sdrc_t
@@ -1405,7 +1474,6 @@ smb_trans_dispatch(smb_request_t *sr, smb_xa_t *xa)
 	uint16_t	devstate;
 	char		*req_fmt;
 	char		*rep_fmt;
-	smb_vdb_t	vdb;
 
 	if (xa->smb_suwcnt > 0 && STYPE_ISIPC(sr->tid_tree->t_res_type)) {
 		rc = smb_mbc_decodef(&xa->req_setup_mb, "ww", &opcode,
@@ -1422,26 +1490,11 @@ smb_trans_dispatch(smb_request_t *sr, smb_xa_t *xa)
 			break;
 
 		case TRANS_TRANSACT_NMPIPE:
-			smbsr_lookup_file(sr);
-			if (sr->fid_ofile == NULL) {
-				smbsr_error(sr, NT_STATUS_INVALID_HANDLE,
-				    ERRDOS, ERRbadfid);
-				return (SDRC_ERROR);
-			}
-
-			rc = smb_mbc_decodef(&xa->req_data_mb, "#B",
-			    xa->smb_tdscnt, &vdb);
-			if (rc != 0)
-				goto trans_err_not_supported;
-
-			rc = smb_opipe_transact(sr, &vdb.vdb_uio);
+			rc = smb_trans_nmpipe(sr, xa);
 			break;
 
 		case TRANS_WAIT_NMPIPE:
-			if (!is_supported_pipe(xa->xa_pipe_name)) {
-				smbsr_error(sr, 0, ERRDOS, ERRbadfile);
-				return (SDRC_ERROR);
-			}
+			delay(SEC_TO_TICK(1));
 			rc = SDRC_SUCCESS;
 			break;
 
@@ -1569,7 +1622,8 @@ smb_trans2_dispatch(smb_request_t *sr, smb_xa_t *xa)
 {
 	int		rc, pos;
 	int		total_bytes, n_setup, n_param, n_data;
-	int		param_off, param_pad, data_off, data_pad;
+	int		param_off, param_pad, data_off;
+	uint16_t	data_pad;
 	uint16_t	opcode;
 	uint16_t  nt_unknown_secret = 0x0100;
 	char *fmt;
@@ -1730,7 +1784,6 @@ smb_trans2_dispatch(smb_request_t *sr, smb_xa_t *xa)
 		/* Param off from hdr start */
 		data_off = param_off + n_param + data_pad;
 		fmt = "bww2.wwwwwwb.Cw#.C#.C";
-		/*LINTED E_ASSIGN_NARROW_CONV*/
 		nt_unknown_secret = data_pad;
 	}
 

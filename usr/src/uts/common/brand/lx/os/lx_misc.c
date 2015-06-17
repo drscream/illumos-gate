@@ -38,6 +38,7 @@
 #include <sys/lx_brand.h>
 #include <sys/lx_misc.h>
 #include <sys/lx_futex.h>
+#include <lx_errno.h>
 #include <sys/cmn_err.h>
 #include <sys/siginfo.h>
 #include <sys/contract/process_impl.h>
@@ -48,6 +49,8 @@
 #include <sys/proc.h>
 #include <net/if.h>
 #include <sys/sunddi.h>
+#include <sys/dlpi.h>
+#include <sys/sysmacros.h>
 
 /* Linux specific functions and definitions */
 static void lx_save(klwp_t *);
@@ -135,6 +138,33 @@ lx_exec()
 	lx_ptrace_stop(LX_PR_SYSEXIT);
 }
 
+static void
+lx_cleanlwp(klwp_t *lwp, proc_t *p)
+{
+	struct lx_lwp_data *lwpd = lwptolxlwp(lwp);
+	void *rb_list = NULL;
+
+	VERIFY(lwpd != NULL);
+
+	mutex_enter(&p->p_lock);
+	if ((lwpd->br_ptrace_flags & LX_PTF_EXITING) == 0) {
+		lx_ptrace_exit(p, lwp);
+	}
+
+	/*
+	 * While we have p_lock, safely grab any robust_list references and
+	 * clear the lwp field.
+	 */
+	sprlock_proc(p);
+	rb_list = lwpd->br_robust_list;
+	lwpd->br_robust_list = NULL;
+	sprunlock(p);
+
+	if (rb_list != NULL) {
+		lx_futex_robust_exit((uintptr_t)rb_list, lwpd->br_pid);
+	}
+}
+
 void
 lx_exitlwp(klwp_t *lwp)
 {
@@ -147,22 +177,18 @@ lx_exitlwp(klwp_t *lwp)
 
 	VERIFY(MUTEX_NOT_HELD(&p->p_lock));
 
-	if (lwpd == NULL)
-		return;		/* second time thru' */
-
-	mutex_enter(&p->p_lock);
-	lx_ptrace_exit(p, lwp);
-	mutex_exit(&p->p_lock);
-
-	if (lwpd->br_robust_list != NULL) {
-		lx_futex_robust_exit((uintptr_t)lwpd->br_robust_list,
-		    lwpd->br_pid);
+	if (lwpd == NULL) {
+		/* second time thru' */
+		return;
 	}
+
+	lx_cleanlwp(lwp, p);
 
 	if (lwpd->br_clear_ctidp != NULL) {
 		(void) suword32(lwpd->br_clear_ctidp, 0);
 		(void) lx_futex((uintptr_t)lwpd->br_clear_ctidp, FUTEX_WAKE, 1,
 		    NULL, NULL, 0);
+		lwpd->br_clear_ctidp = NULL;
 	}
 
 	if (lwpd->br_signal != 0) {
@@ -233,7 +259,21 @@ void
 lx_freelwp(klwp_t *lwp)
 {
 	struct lx_lwp_data *lwpd = lwptolxlwp(lwp);
+	proc_t *p = lwptoproc(lwp);
+
 	VERIFY(lwpd != NULL);
+	VERIFY(MUTEX_NOT_HELD(&p->p_lock));
+
+	/*
+	 * It is possible for the lx_freelwp hook to be called without a prior
+	 * call to lx_exitlwp being made.  This happens as part of lwp
+	 * de-branding when a native binary is executed from a branded process.
+	 *
+	 * To cover all cases, lx_cleanlwp is called from lx_exitlwp as well
+	 * here in lx_freelwp.  When the second call is redundant, the
+	 * resources will already be freed and no work will be needed.
+	 */
+	lx_cleanlwp(lwp, p);
 
 	/*
 	 * Remove our system call interposer.
@@ -692,16 +732,77 @@ lx_wait_filter(proc_t *pp, proc_t *cp)
 }
 
 void
-lx_ifname_convert(char *ifname, int flag)
+lx_ifname_convert(char *ifname, lx_if_action_t act)
 {
-	ASSERT(flag == LX_IFNAME_FROMNATIVE ||
-	    flag == LX_IFNAME_TONATIVE);
-
-	if (flag == LX_IFNAME_TONATIVE) {
+	if (act == LX_IF_TONATIVE) {
 		if (strncmp(ifname, "lo", IFNAMSIZ) == 0)
 			(void) strlcpy(ifname, "lo0", IFNAMSIZ);
-	} else if (flag == LX_IFNAME_FROMNATIVE) {
+	} else {
 		if (strncmp(ifname, "lo0", IFNAMSIZ) == 0)
 			(void) strlcpy(ifname, "lo", IFNAMSIZ);
+	}
+}
+
+void
+lx_ifflags_convert(uint64_t *flags, lx_if_action_t act)
+{
+	uint64_t buf;
+
+	buf = *flags & (IFF_UP | IFF_BROADCAST | IFF_DEBUG |
+	    IFF_LOOPBACK | IFF_POINTOPOINT | IFF_NOTRAILERS |
+	    IFF_RUNNING | IFF_NOARP | IFF_PROMISC | IFF_ALLMULTI);
+
+	/* Linux has different shift for multicast flag */
+	if (act == LX_IF_TONATIVE) {
+		if (*flags & 0x1000)
+			buf |= IFF_MULTICAST;
+	} else {
+		if (*flags & IFF_MULTICAST)
+			buf |= 0x1000;
+	}
+	*flags = buf;
+}
+
+
+void
+lx_stol_hwaddr(const struct sockaddr_dl *src, struct sockaddr *dst, int *size)
+{
+	int copy_size = MIN(src->sdl_alen, sizeof (dst->sa_data));
+
+	switch (src->sdl_type) {
+	case DL_ETHER:
+		dst->sa_family = LX_ARPHRD_ETHER;
+		break;
+	case DL_LOOP:
+		dst->sa_family = LX_ARPHRD_LOOPBACK;
+		break;
+	default:
+		dst->sa_family = LX_ARPHRD_VOID;
+	}
+
+	bcopy(LLADDR(src), dst->sa_data, copy_size);
+	*size = copy_size;
+}
+
+/*
+ * Brand hook to convert native kernel siginfo signal number, errno, code, pid
+ * and si_status to Linux values. Similar to the stol_ksiginfo function but
+ * this one converts in-place, converts the pid, and does not copyout.
+ */
+void
+lx_sigfd_translate(k_siginfo_t *infop)
+{
+	infop->si_signo = lx_stol_signo(infop->si_signo, LX_SIGKILL);
+
+	infop->si_status = lx_stol_status(infop->si_status, LX_SIGKILL);
+
+	infop->si_code = lx_stol_sigcode(infop->si_code);
+
+	infop->si_errno = lx_errno(infop->si_errno, EINVAL);
+
+	if (infop->si_pid == curproc->p_zone->zone_proc_initpid) {
+		infop->si_pid = 1;
+	} else if (infop->si_pid == curproc->p_zone->zone_zsched->p_pid) {
+		infop->si_pid = 0;
 	}
 }

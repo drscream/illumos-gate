@@ -78,7 +78,6 @@ typedef enum {
 
 static int lx_socket32(ulong_t *);
 static int lx_bind32(ulong_t *);
-static int lx_connect32(ulong_t *);
 static int lx_listen32(ulong_t *);
 static int lx_accept32(ulong_t *);
 static int lx_getsockname32(ulong_t *);
@@ -105,7 +104,7 @@ static struct {
 } sockfns[] = {
 	lx_socket32, 3,
 	lx_bind32, 3,
-	lx_connect32, 3,
+	NULL, 3,
 	lx_listen32, 2,
 	lx_accept32, 3,
 	lx_getsockname32, 3,
@@ -140,21 +139,24 @@ static const int ltos_family[LX_AF_MAX + 1] =  {
 	AF_PACKET, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
-	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED
+	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
+	AF_NOTSUPPORTED
 };
 
 #define	LX_AF_INET6	10
+#define	LX_AF_NETLINK	16
 #define	LX_AF_PACKET	17
 
 static const int stol_family[LX_AF_MAX + 1] =  {
 	AF_UNSPEC, AF_UNIX, AF_INET, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
-	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_LX_NETLINK,
+	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
 	AF_NOTSUPPORTED, LX_AF_INET6, AF_NOTSUPPORTED, AF_NOTSUPPORTED,
-	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, LX_AF_PACKET
+	AF_NOTSUPPORTED, AF_NOTSUPPORTED, AF_NOTSUPPORTED, LX_AF_PACKET,
+	LX_AF_NETLINK
 };
 
 #define	LTOS_FAMILY(d) ((d) <= LX_AF_MAX ? ltos_family[(d)] : AF_INVAL)
@@ -575,6 +577,11 @@ static lx_proto_opts_t tcp_sockopts_tbl = PROTO_SOCKOPTS(ltos_tcp_sockopts);
 static lx_proto_opts_t raw_sockopts_tbl = PROTO_SOCKOPTS(ltos_raw_sockopts);
 static lx_proto_opts_t packet_sockopts_tbl =
     PROTO_SOCKOPTS(ltos_packet_sockopts);
+/* lx_netlink does straight passthrough, so fake a table for it */
+static lx_proto_opts_t netlink_sockopts_tbl = {
+	NULL,
+	LX_SOL_NETLINK_MAX_ENTRY
+};
 
 
 /* Needed for SO_ATTACH_FILTER */
@@ -616,7 +623,6 @@ struct lx_bpf_program {
 #define	LX_TO_SOL	1
 #define	SOL_TO_LX	2
 
-#define	LX_AF_NETLINK			16
 #define	LX_NETLINK_KOBJECT_UEVENT	15
 #define	LX_NETLINK_ROUTE		0
 
@@ -705,7 +711,8 @@ ltos_xform_cmsgs(struct lx_msghdr *msg, struct cmsghdr *ntv_cmsg)
 		lcmsg = LX_CMSG_NXTHDR(msg, last);
 
 		lp = cmsg;
-		cmsg = CMSG_NXTHDR(msg, lp);
+		cmsg = (struct cmsghdr *)_CMSG_HDR_ALIGN((char *)cmsg +
+		    cmsg->cmsg_len);
 
 		nlen += (int)((uint64_t)cmsg - (uint64_t)lp);
 	}
@@ -854,8 +861,9 @@ calc_addr_size(struct sockaddr *a, int nlen, lx_addr_type_t *type)
 	struct sockaddr name;
 	sa_family_t family;
 	size_t fsize = sizeof (name.sa_family);
+	int copylen = MIN(nlen, sizeof (struct sockaddr));
 
-	if (uucopy(a, &name, sizeof (struct sockaddr)) != 0)
+	if (uucopy(a, &name, copylen) != 0)
 		return (-errno);
 	family = LTOS_FAMILY(name.sa_family);
 
@@ -1069,7 +1077,6 @@ static int
 stol_sockaddr(struct sockaddr *addr, socklen_t *len,
     struct sockaddr *inaddr, socklen_t inlen, socklen_t orig)
 {
-	struct sockaddr_in6 stemp;
 	int size = inlen;
 
 	switch (inaddr->sa_family) {
@@ -1081,17 +1088,12 @@ stol_sockaddr(struct sockaddr *addr, socklen_t *len,
 	case AF_INET6:
 		if (inlen != sizeof (struct sockaddr_in6))
 			return (EINVAL);
-		size = (sizeof (lx_sockaddr_in6_t));
-
-		if (uucopy(inaddr, &stemp, inlen) < 0)
-			return (errno);
 		/*
-		 * AF_INET6 is different between Linux/illumos.
-		 * Perform this translation in a temporary sockaddr.
+		 * The linux sockaddr_in6 is shorter than illumos.
+		 * We just truncate the extra field on the way out
 		 */
-		stemp.sin6_family = STOL_FAMILY(stemp.sin6_family);
-		inaddr = (struct sockaddr *)&stemp;
-		inlen = sizeof (lx_sockaddr_in6_t);
+		size = (sizeof (lx_sockaddr_in6_t));
+		inlen = (sizeof (lx_sockaddr_in6_t));
 		break;
 
 	case AF_UNIX:
@@ -1108,6 +1110,8 @@ stol_sockaddr(struct sockaddr *addr, socklen_t *len,
 	default:
 		break;
 	}
+
+	inaddr->sa_family = STOL_FAMILY(inaddr->sa_family);
 
 	/*
 	 * If inlen is larger than orig, copy out the maximum amount of
@@ -1392,35 +1396,6 @@ lx_bind(int sockfd, void *np, int nl)
 	    ((stat64(name->sa_data, &statbuf) == 0) &&
 	    (!S_ISSOCK(statbuf.st_mode))))
 		return (-EADDRINUSE);
-
-	return ((r < 0) ? -errno : r);
-}
-
-long
-lx_connect(int sockfd, void *np, int nl)
-{
-	struct sockaddr *name;
-	socklen_t len;
-	int r;
-	int nlen;
-	lx_addr_type_t type;
-
-	if ((nlen = calc_addr_size(np, nl, &type)) < 0)
-		return (nlen);
-
-	if ((name = SAFE_ALLOCA(nlen)) == NULL)
-		return (-EINVAL);
-	bzero(name, nlen);
-
-	if ((r = ltos_sockaddr(name, &len, np, nl, type)) < 0)
-		return (r);
-
-	lx_debug("\tconnect(%d, 0x%p, %d)", sockfd, name, len);
-
-	if (name->sa_family == AF_UNIX)
-		lx_debug("\t\tAF_UNIX, path = %s", name->sa_data);
-
-	r = connect(sockfd, name, len);
 
 	return ((r < 0) ? -errno : r);
 }
@@ -1836,6 +1811,7 @@ get_proto_opt_tbl(int level)
 	case LX_IPPROTO_ICMPV6:	return (&icmpv6_sockopts_tbl);
 	case LX_IPPROTO_RAW:	return (&raw_sockopts_tbl);
 	case LX_SOL_PACKET:	return (&packet_sockopts_tbl);
+	case LX_SOL_NETLINK:	return (&netlink_sockopts_tbl);
 	default:
 		lx_unsupported("Unsupported sockopt level %d", level);
 		return (NULL);
@@ -1845,8 +1821,6 @@ get_proto_opt_tbl(int level)
 long
 lx_setsockopt(int sockfd, int level, int optname, void *optval, int optlen)
 {
-	int internal_opt;
-	uchar_t internal_uchar;
 	int r;
 	lx_proto_opts_t *proto_opts;
 	boolean_t converted = B_FALSE;
@@ -1861,7 +1835,7 @@ lx_setsockopt(int sockfd, int level, int optname, void *optval, int optlen)
 	if (optval == NULL)
 		return (-EFAULT);
 
-	if (level > LX_SOL_PACKET || level == LX_IPPROTO_UDP)
+	if (level > LX_SOL_NETLINK || level == LX_IPPROTO_UDP)
 		return (-ENOPROTOOPT);
 
 	if ((proto_opts = get_proto_opt_tbl(level)) == NULL)
@@ -1903,21 +1877,24 @@ lx_setsockopt(int sockfd, int level, int optname, void *optval, int optlen)
 		 * the option value to be an integer while we define it to be
 		 * an unsigned character.  To prevent the kernel from spitting
 		 * back an error on an illegal length, verify that the option
-		 * value is less than UCHAR_MAX and then swizzle it.
+		 * value is less than UCHAR_MAX before truncating optlen.
 		 */
 		if (optname == LX_IP_MULTICAST_TTL ||
 		    optname == LX_IP_MULTICAST_LOOP) {
-			if (optlen != sizeof (int))
+			int optcopy = 0;
+
+			if (optlen > sizeof (int) || optlen <= 0)
 				return (-EINVAL);
 
-			if (uucopy(optval, &internal_opt, sizeof (int)) != 0)
+			if (uucopy(optval, &optcopy, optlen) != 0)
 				return (-errno);
 
-			if (internal_opt > UCHAR_MAX)
+			if (optcopy > UCHAR_MAX)
 				return (-EINVAL);
 
-			internal_uchar = (uchar_t)internal_opt;
-			optval = &internal_uchar;
+			/*
+			 * With optval validated, only optlen must be changed.
+			 */
 			optlen = sizeof (uchar_t);
 		}
 	} else if (level == LX_IPPROTO_IPV6) {
@@ -1946,6 +1923,35 @@ lx_setsockopt(int sockfd, int level, int optname, void *optval, int optlen)
 				filter->__icmp6_filt[i] ^= 0xffffffff;
 			optval = filter;
 		}
+	} else if (level == LX_IPPROTO_TCP && optname == LX_TCP_DEFER_ACCEPT) {
+		/*
+		 * Emulate TCP_DEFER_ACCEPT using the datafilt(7M) socket
+		 * filter but we can't emulate the timeout aspect so treat any
+		 * non-zero value as enabling and zero as disabling.
+		 */
+		int val;
+
+		if (optlen != sizeof (val))
+			return (-EINVAL);
+		if (uucopy(optval, &val, optlen) != 0)
+			return (-EFAULT);
+		if (val < 0)
+			return (-EINVAL);
+
+		if (val > 0) {
+			if (setsockopt(sockfd, SOL_FILTER, FIL_ATTACH,
+			    "datafilt", 9) < 0) {
+				if (errno != EEXIST)
+					return (-errno);
+			}
+		} else {
+			if (setsockopt(sockfd, SOL_FILTER, FIL_DETACH,
+			    "datafilt", 9) < 0) {
+				if (errno != ENXIO)
+					return (-errno);
+			}
+		}
+		return (0);
 	} else if (level == LX_SOL_SOCKET) {
 		/* Linux ignores this option. */
 		if (optname == LX_SO_BSDCOMPAT)
@@ -1999,6 +2005,9 @@ lx_setsockopt(int sockfd, int level, int optname, void *optval, int optlen)
 				return (-EINVAL);
 			optval = mr;
 		}
+	} else if (level == LX_SOL_NETLINK) {
+		/* Just pass netlink options straight through */
+		converted = B_TRUE;
 	}
 
 	if (!converted) {
@@ -2055,21 +2064,54 @@ lx_getsockopt(int sockfd, int level, int optname, void *optval, int *optlenp)
 		return (-ENOPROTOOPT);
 	}
 
-	if ((level == LX_IPPROTO_TCP) && (optname == LX_TCP_CORK)) {
-		/*
-		 * We don't support TCP_CORK but some apps rely on it.  So,
-		 * rather than return an error we just return 0.  This
-		 * isn't exactly a lie, since this option really isn't set,
-		 * but it's not the whole truth either.  Fortunately, we
-		 * aren't under oath.
-		 */
-		r = 0;
-		if (uucopy(&r, optval, sizeof (int)) != 0)
-			return (-errno);
-		r = sizeof (int);
-		if (uucopy(&r, optlenp, sizeof (int)) != 0)
-			return (-errno);
-		return (0);
+	if (level == LX_IPPROTO_TCP) {
+		if (optname == LX_TCP_CORK) {
+			/*
+			 * We don't support TCP_CORK but some apps rely on it.
+			 * So, rather than return an error we just return 0.
+			 * This isn't exactly a lie, since this option really
+			 * isn't set, but it's not the whole truth either.
+			 * Fortunately, we aren't under oath.
+			 */
+			r = 0;
+			if (uucopy(&r, optval, sizeof (int)) != 0)
+				return (-errno);
+			r = sizeof (int);
+			if (uucopy(&r, optlenp, sizeof (int)) != 0)
+				return (-errno);
+			return (0);
+		} else if (optname == LX_TCP_DEFER_ACCEPT) {
+			/*
+			 * We do support TCP_DEFER_ACCEPT using the
+			 * datafilt(7M) socket filter but we don't emulate the
+			 * timeout aspect so treat the existence as 1 and
+			 * absence as 0.
+			 */
+			struct fil_info fi[10];
+			int i, tot, len, r;
+
+			len = sizeof (fi);
+			if (getsockopt(sockfd, SOL_FILTER, FIL_LIST, fi,
+			    &len) < 0)
+				return (-errno);
+
+			tot = len / sizeof (struct fil_info);
+			r = 0;
+			for (i = 0; i < tot; i++) {
+				if (fi[i].fi_flags == FILF_PROG &&
+				    strcmp(fi[i].fi_name, "datafilt") == 0) {
+					r = 1;
+					break;
+				}
+			}
+
+			if (uucopy(&r, optval, sizeof (int)) != 0)
+				return (-errno);
+			r = sizeof (int);
+			if (uucopy(&r, optlenp, sizeof (int)) != 0)
+				return (-errno);
+			return (0);
+		}
 	}
 	if ((level == LX_SOL_SOCKET) && (optname == LX_SO_PEERCRED)) {
 		struct lx_ucred	lx_ucred;
@@ -2182,10 +2224,10 @@ long
 lx_sendmsg(int sockfd, void *lmp, int flags)
 {
 	struct lx_msghdr msg;
-	struct sockaddr *name;
-	struct cmsghdr *cmsg;
+	struct sockaddr *name = NULL;
+	struct cmsghdr *cmsg = NULL;
 	void *new_cmsg = NULL;
-	int r, size;
+	int r, size, res;
 	lx_addr_type_t type;
 	socklen_t len;
 
@@ -2203,18 +2245,20 @@ lx_sendmsg(int sockfd, void *lmp, int flags)
 	 * Perform conversion on msg_name, if present.
 	 */
 	if (msg.msg_name != NULL) {
-		if (msg.msg_namelen < sizeof (struct sockaddr))
-			return (-EINVAL);
 		size = calc_addr_size(msg.msg_name, msg.msg_namelen, &type);
 		if (size < 0)
 			return (size);
-		if ((name = SAFE_ALLOCA(size)) == NULL)
-			return (-ENOMEM);
+		if ((name = malloc(size)) == NULL) {
+			res = -ENOMEM;
+			goto err;
+		}
 		bzero(name, size);
 
 		if ((r = ltos_sockaddr(name, &len, msg.msg_name,
-		    msg.msg_namelen, type)) < 0)
-			return (r);
+		    msg.msg_namelen, type)) < 0) {
+			res = r;
+			goto err;
+		}
 		msg.msg_name = name;
 		msg.msg_namelen = len;
 	}
@@ -2227,9 +2271,11 @@ lx_sendmsg(int sockfd, void *lmp, int flags)
 		if (msg.msg_controllen == 0) {
 			cmsg = NULL;
 		} else {
-			cmsg = SAFE_ALLOCA(msg.msg_controllen);
-			if (cmsg == NULL)
-				return (-EINVAL);
+			cmsg = malloc(msg.msg_controllen);
+			if (cmsg == NULL) {
+				res = -EINVAL;
+				goto err;
+			}
 #if defined(_LP64)
 			/*
 			 * We don't know in advance how many control msgs
@@ -2238,18 +2284,23 @@ lx_sendmsg(int sockfd, void *lmp, int flags)
 			 * the same size will over-estimate what we actually
 			 * need.
 			 */
-			new_cmsg = SAFE_ALLOCA(msg.msg_controllen);
-			if (new_cmsg == NULL)
-				return (-EINVAL);
+			new_cmsg = malloc(msg.msg_controllen);
+			if (new_cmsg == NULL) {
+				res = -EINVAL;
+				goto err;
+			}
 #endif
 		}
-		if ((uucopy(msg.msg_control, cmsg,
-		    msg.msg_controllen)) != 0)
-			return (-errno);
+		if ((uucopy(msg.msg_control, cmsg, msg.msg_controllen)) != 0) {
+			res = -errno;
+			goto err;
+		}
 		msg.msg_control = cmsg;
 		if ((r = convert_cmsgs(LX_TO_SOL, &msg, new_cmsg,
-		    "sendmsg()")) != 0)
-			return (-r);
+		    "sendmsg()")) != 0) {
+			res = -r;
+			goto err;
+		}
 	}
 
 	/*
@@ -2284,12 +2335,22 @@ lx_sendmsg(int sockfd, void *lmp, int flags)
 		 * this case is EPIPE.
 		 */
 		if (errno == ENOTCONN)
-			return (-EPIPE);
+			res = -EPIPE;
 		else
-			return (-errno);
+			res = -errno;
+		goto err;
 	}
 
-	return (r);
+	res = r;
+
+err:
+	if (name != NULL)
+		free(name);
+	if (cmsg != NULL)
+		free(cmsg);
+	if (new_cmsg != NULL)
+		free(new_cmsg);
+	return (res);
 }
 
 long
@@ -2521,13 +2582,6 @@ lx_bind32(ulong_t *args)
 }
 
 static int
-lx_connect32(ulong_t *args)
-{
-	return (lx_connect((int)args[0], (struct sockaddr *)args[1],
-	    (int)args[2]));
-}
-
-static int
 lx_listen32(ulong_t *args)
 {
 	return (lx_listen((int)args[0], (int)args[1]));
@@ -2733,6 +2787,11 @@ lx_socketcall(uintptr_t p1, uintptr_t p2)
 
 	if (subcmd < 0 || subcmd >= LX_SENDMMSG)
 		return (-EINVAL);
+
+	/* Bail out if we are trying to call an IKE function */
+	if (sockfns[subcmd].s_fn == NULL) {
+		lx_err_fatal("lx_socketcall: deprecated subcmd: %d", subcmd);
+	}
 
 	/*
 	 * Copy the arguments to the subcommand in from the app's address

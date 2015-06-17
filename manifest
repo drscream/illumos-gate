@@ -348,17 +348,9 @@ d etc/init.d 0755 root sys
 f etc/init.d/PRESERVE 0744 root sys
 f etc/init.d/README 0644 root sys
 f etc/init.d/acct 0744 root sys
-f etc/init.d/devlinks 0744 root sys
 f etc/init.d/dodatadm.udaplt 0744 root sys
-f etc/init.d/drvconfig 0744 root sys
-f etc/init.d/ldap.client 0744 root sys
-f etc/init.d/nfs.server 0744 root sys
-f etc/init.d/nscd 0744 root sys
 f etc/init.d/pppd 0744 root sys
-f etc/init.d/sendmail 0744 root sys
-f etc/init.d/slpd 0744 root sys
 f etc/init.d/sysetup 0744 root sys
-f etc/init.d/ufs_quota 0744 root sys
 f etc/ioctl.syscon 0644 root sys
 d etc/ipadm 0755 netadm netadm
 f etc/ipadm/ipadm.conf 0644 netadm netadm
@@ -1057,6 +1049,7 @@ f kernel/sched/amd64/TS 0755 root sys
 f kernel/sched/amd64/TS_DPTBL 0755 root sys
 d kernel/socketmod 0755 root sys
 d kernel/socketmod/amd64 0755 root sys
+f kernel/socketmod/amd64/datafilt 0755 root sys
 h kernel/socketmod/amd64/icmp=kernel/drv/amd64/icmp
 f kernel/socketmod/amd64/ksslf 0755 root sys
 f kernel/socketmod/amd64/lx_netlink 0755 root sys
@@ -1431,6 +1424,7 @@ f lib/libsmartsshd.so.1 0755 root bin
 s lib/libsmartsshd.so=libsmartsshd.so.1
 f lib/libsocket.so.1 0755 root bin
 s lib/libsocket.so=libsocket.so.1
+f lib/libsqlite-sys.so.2.8.15 0755 root bin
 f lib/libsysevent.so.1 0755 root bin
 s lib/libsysevent.so=libsysevent.so.1
 f lib/libtermcap.so.1 0755 root bin
@@ -3300,9 +3294,6 @@ f usr/include/smbsrv/winsvc.h 0644 root bin
 f usr/include/smbsrv/wintypes.h 0644 root bin
 f usr/include/smhbaapi.h 0644 root bin
 f usr/include/spawn.h 0644 root bin
-d usr/include/sqlite 0755 root bin
-f usr/include/sqlite/sqlite-misc.h 0644 root bin
-f usr/include/sqlite/sqlite.h 0644 root bin
 f usr/include/stack_unwind.h 0644 root bin
 f usr/include/stdarg.h 0644 root bin
 f usr/include/stdbool.h 0644 root bin
@@ -4205,6 +4196,7 @@ f usr/include/sys/shm_impl.h 0644 root bin
 f usr/include/sys/sid.h 0644 root bin
 f usr/include/sys/siginfo.h 0644 root bin
 f usr/include/sys/signal.h 0644 root bin
+f usr/include/sys/signalfd.h 0644 root bin
 f usr/include/sys/sleepq.h 0644 root bin
 f usr/include/sys/smbios.h 0644 root bin
 f usr/include/sys/smbios_impl.h 0644 root bin
@@ -4538,6 +4530,7 @@ f usr/kernel/drv/amd64/pm 0755 root sys
 f usr/kernel/drv/amd64/pool 0755 root sys
 f usr/kernel/drv/amd64/ptm 0755 root sys
 f usr/kernel/drv/amd64/pts 0755 root sys
+f usr/kernel/drv/amd64/signalfd 0755 root sys
 f usr/kernel/drv/amd64/smbsrv 0755 root sys
 f usr/kernel/drv/amd64/sppp 0755 root sys
 f usr/kernel/drv/amd64/sppptun 0755 root sys
@@ -4562,6 +4555,7 @@ f usr/kernel/drv/pm.conf 0644 root sys
 f usr/kernel/drv/pool.conf 0644 root sys
 f usr/kernel/drv/ptm.conf 0644 root sys
 f usr/kernel/drv/pts.conf 0644 root sys
+f usr/kernel/drv/signalfd.conf 0644 root sys
 f usr/kernel/drv/smbsrv.conf 0644 root sys
 f usr/kernel/drv/sppp.conf 0644 root sys
 f usr/kernel/drv/sppptun.conf 0644 root sys
@@ -4569,8 +4563,10 @@ f usr/kernel/drv/timerfd.conf 0644 root sys
 d usr/kernel/fs 0755 root sys
 d usr/kernel/fs/amd64 0755 root sys
 f usr/kernel/fs/amd64/fdfs 0755 root sys
-f usr/kernel/fs/amd64/lx_afs 0755 root sys
+f usr/kernel/fs/amd64/lxautofs 0755 root sys
+f usr/kernel/fs/amd64/lx_cgroup 0755 root sys
 f usr/kernel/fs/amd64/lx_proc 0755 root sys
+f usr/kernel/fs/amd64/lx_sysfs 0755 root sys
 f usr/kernel/fs/amd64/pcfs 0755 root sys
 f usr/kernel/fs/amd64/smbfs 0755 root sys
 d usr/kernel/kmdb 0755 root sys
@@ -5046,30 +5042,23 @@ d usr/lib/brand/lx 0755 root bin
 s usr/lib/brand/lx/64=amd64
 d usr/lib/brand/lx/amd64 0755 root bin
 f usr/lib/brand/lx/amd64/lx_librtld_db.so.1 0755 root root
-f usr/lib/brand/lx/amd64/lx_nametoaddr.so.1 0755 root root
-f usr/lib/brand/lx/amd64/lx_thunk.so.1 0755 root root
 f usr/lib/brand/lx/amd64/lx_vdso.so.1 0755 root root
 d usr/lib/brand/lx/ld 0755 root root
 f usr/lib/brand/lx/ld/ld.config 0755 root root
 d usr/lib/brand/lx/ld/64 0755 root root
 f usr/lib/brand/lx/ld/64/ld.config 0755 root root
 f usr/lib/brand/lx/etc_default_nfs 0444 root root
-f usr/lib/brand/lx/etc_netconfig 0444 root root
 f usr/lib/brand/lx/ltp_skiplist 0444 root root
 f usr/lib/brand/lx/ltp_tests 0444 root root
 f usr/lib/brand/lx/lx_boot 0755 root root
 f usr/lib/brand/lx/lx_boot_zone_debian 0755 root root
 f usr/lib/brand/lx/lx_boot_zone_redhat 0755 root root
+f usr/lib/brand/lx/lx_boot_zone_busybox 0755 root root
 f usr/lib/brand/lx/lx_boot_zone_ubuntu 0755 root root
-f usr/lib/brand/lx/lx_isaexec_wrapper 0755 root root
+f usr/lib/brand/lx/lxinit 0755 root root
 f usr/lib/brand/lx/lx_librtld_db.so.1 0755 root root
-f usr/lib/brand/lx/lx_lockd 0755 root root
-f usr/lib/brand/lx/lx_nametoaddr.so.1 0755 root root
 f usr/lib/brand/lx/lx_native 0755 root root
-f usr/lib/brand/lx/lx_statd 0755 root root
 f usr/lib/brand/lx/lx_support 0755 root root
-f usr/lib/brand/lx/lx_thunk 0755 root root
-f usr/lib/brand/lx/lx_thunk.so.1 0755 root root
 f usr/lib/brand/lx/platform.xml 0444 root root
 d usr/lib/brand/shared 0755 root sys
 f usr/lib/brand/shared/common.ksh 0444 root bin
@@ -6392,8 +6381,6 @@ s usr/lib/libsocket.so.1=../../lib/libsocket.so.1
 s usr/lib/libsocket.so=../../lib/libsocket.so.1
 f usr/lib/libsoftcrypto.so.1 0755 root bin
 s usr/lib/libsoftcrypto.so=libsoftcrypto.so.1
-f usr/lib/libsqlite-native.o 0644 root bin
-f usr/lib/libsqlite.o 0644 root bin
 f usr/lib/libsrpt.so.1 0755 root bin
 s usr/lib/libsrpt.so=libsrpt.so.1
 f usr/lib/libstanddisasm.so 0644 root bin
@@ -10006,8 +9993,6 @@ f usr/lib/smbsrv/libsmb.so.1 0755 root bin
 s usr/lib/smbsrv/libsmb.so=libsmb.so.1
 f usr/lib/smbsrv/libsmbns.so.1 0755 root bin
 s usr/lib/smbsrv/libsmbns.so=libsmbns.so.1
-f usr/lib/smbsrv/libsqlite.so.1 0755 root bin
-s usr/lib/smbsrv/libsqlite.so=libsqlite.so.1
 f usr/lib/smbsrv/smbd 0755 root bin
 d usr/lib/smedia 0755 root bin
 d usr/lib/smedia/amd64 0755 root bin
@@ -13531,6 +13516,7 @@ f usr/share/man/man3c/siginterrupt.3c 0444 root bin
 s usr/share/man/man3c/sigismember.3c=sigsetops.3c
 s usr/share/man/man3c/siglongjmp.3c=setjmp.3c
 f usr/share/man/man3c/signal.3c 0444 root bin
+f usr/share/man/man3c/signalfd.3c 0444 root bin
 s usr/share/man/man3c/sigpause.3c=signal.3c
 f usr/share/man/man3c/sigqueue.3c 0444 root bin
 s usr/share/man/man3c/sigrelse.3c=signal.3c
@@ -18543,6 +18529,7 @@ f usr/share/man/man7ipp/tswtclmt.7ipp 0444 root bin
 d usr/share/man/man7m 0755 root bin
 f usr/share/man/man7m/bufmod.7m 0444 root bin
 f usr/share/man/man7m/connld.7m 0444 root bin
+f usr/share/man/man7m/datafilt.7m 0444 root bin
 f usr/share/man/man7m/ldterm.7m 0444 root bin
 f usr/share/man/man7m/pckt.7m 0444 root bin
 f usr/share/man/man7m/pfmod.7m 0444 root bin

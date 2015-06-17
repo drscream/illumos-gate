@@ -63,7 +63,7 @@ extern "C" {
 #define	LX_AF_PPPOX		24 /* PPPoX sockets */
 #define	LX_AF_WANPIPE		25 /* Wanpipe API sockets */
 #define	LX_AF_BLUETOOTH		31 /* Bluetooth sockets */
-#define	LX_AF_MAX		32 /* MAX socket type  */
+#define	LX_AF_MAX		33 /* MAX socket type  */
 
 #define	AF_NOTSUPPORTED		-1
 #define	AF_INVAL		-2
@@ -355,7 +355,12 @@ extern "C" {
 #define	LX_PACKET_RX_RING			5
 #define	LX_PACKET_STATISTICS			6
 
-
+/*
+ * Options for use with [gs]etsockopt at the NETLINK level.
+ * SOL_NETLINK
+ */
+#define	LX_SOL_NETLINK				270
+#define	LX_SOL_NETLINK_MAX_ENTRY		8
 
 /*
  * Linux socketcall indices.

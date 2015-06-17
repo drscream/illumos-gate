@@ -73,7 +73,6 @@
 #include <sys/lx_signal.h>
 #include <sys/lx_syscall.h>
 #include <sys/lx_thread.h>
-#include <sys/lx_thunk_server.h>
 #include <sys/lx_aio.h>
 
 /*
@@ -689,9 +688,6 @@ lx_init(int argc, char *argv[], char *envp[])
 		}
 	}
 
-	/* Do any thunk server initalization. */
-	lxt_server_init(argc, argv);
-
 	/* Setup signal handler information. */
 	if (lx_siginit()) {
 		lx_err_fatal("failed to initialize lx signals for the "
@@ -960,7 +956,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/*  39: getpid */
 	lx_sendfile64,			/*  40: sendfile */
 	lx_socket,			/*  41: socket */
-	lx_connect,			/*  42: connect */
+	NULL,				/*  42: connect */
 	lx_accept,			/*  43: accept */
 	lx_sendto,			/*  44: sendto */
 	lx_recvfrom,			/*  45: recvfrom */
@@ -996,7 +992,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	lx_fdatasync,			/*  75: fdatasync */
 	lx_truncate,			/*  76: truncate */
 	lx_ftruncate,			/*  77: ftruncate */
-	lx_getdents,			/*  78: getdents */
+	NULL,				/*  78: getdents */
 	lx_getcwd,			/*  79: getcwd */
 	lx_chdir,			/*  80: chdir */
 	lx_fchdir,			/*  81: fchdir */
@@ -1135,7 +1131,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 214: epoll_ctl_old */
 	NULL,				/* 215: epoll_wait_old */
 	NULL,				/* 216: remap_file_pages */
-	lx_getdents64,			/* 217: getdents64 */
+	NULL,				/* 217: getdents64 */
 	NULL,				/* 218: set_tid_address */
 	NULL,				/* 219: restart_syscall */
 	lx_semtimedop,			/* 220: semtimedop */
@@ -1200,14 +1196,14 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 279: move_pages */
 	lx_utimensat,			/* 280: utimensat */
 	lx_epoll_pwait,			/* 281: epoll_pwait */
-	NULL,				/* 282: signalfd */
+	lx_signalfd,			/* 282: signalfd */
 	lx_timerfd_create,		/* 283: timerfd_create */
 	lx_eventfd,			/* 284: eventfd */
 	NULL,				/* 285: fallocate */
 	lx_timerfd_settime,		/* 286: timerfd_settime */
 	lx_timerfd_gettime,		/* 287: timerfd_gettime */
 	lx_accept4,			/* 288: accept4 */
-	NULL,				/* 289: signalfd4 */
+	lx_signalfd4,			/* 289: signalfd4 */
 	lx_eventfd2,			/* 290: eventfd2 */
 	lx_epoll_create1,		/* 291: epoll_create1 */
 	lx_dup3,			/* 292: dup3 */
@@ -1390,7 +1386,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	lx_setfsuid16,			/* 138: setfsuid16 */
 	lx_setfsgid16,			/* 139: setfsgid16 */
 	lx_llseek,			/* 140: llseek */
-	lx_getdents,			/* 141: getdents */
+	NULL,				/* 141: getdents */
 	lx_select,			/* 142: select */
 	lx_flock,			/* 143: flock */
 	lx_msync,			/* 144: msync */
@@ -1469,7 +1465,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 217: pivot_root */
 	lx_mincore,			/* 218: mincore */
 	lx_madvise,			/* 219: madvise */
-	lx_getdents64,			/* 220: getdents64 */
+	NULL,				/* 220: getdents64 */
 	NULL,				/* 221: fcntl64 */
 	NULL,				/* 222: tux */
 	NULL,				/* 223: security */
@@ -1570,13 +1566,13 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 318: getcpu */
 	lx_epoll_pwait,			/* 319: epoll_pwait */
 	lx_utimensat,			/* 320: utimensat */
-	NULL,				/* 321: signalfd */
+	lx_signalfd,			/* 321: signalfd */
 	lx_timerfd_create,		/* 322: timerfd_create */
 	lx_eventfd,			/* 323: eventfd */
 	NULL,				/* 324: fallocate */
 	lx_timerfd_settime,		/* 325: timerfd_settime */
 	lx_timerfd_gettime,		/* 326: timerfd_gettime */
-	NULL,				/* 327: signalfd4 */
+	lx_signalfd4,			/* 327: signalfd4 */
 	lx_eventfd2,			/* 328: eventfd2 */
 	lx_epoll_create1,		/* 329: epoll_create1 */
 	lx_dup3,			/* 330: dup3 */

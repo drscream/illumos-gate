@@ -77,6 +77,7 @@
 /* Dependent on procfs */
 extern kthread_t *prchoose(proc_t *);
 extern int prreadargv(proc_t *, char *, size_t, size_t *);
+extern int prreadenvv(proc_t *, char *, size_t, size_t *);
 
 #include "lx_proc.h"
 
@@ -134,11 +135,13 @@ static int lxpr_readdir_task_tid_dir(lxpr_node_t *, uio_t *, int *);
 
 static void lxpr_read_invalid(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_empty(lxpr_node_t *, lxpr_uiobuf_t *);
+static void lxpr_read_cgroups(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_cpuinfo(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_diskstats(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_isdir(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_fd(lxpr_node_t *, lxpr_uiobuf_t *);
-static void lxpr_read_kmsg(lxpr_node_t *, lxpr_uiobuf_t *);
+static void lxpr_read_filesystems(lxpr_node_t *, lxpr_uiobuf_t *);
+static void lxpr_read_kmsg(lxpr_node_t *, lxpr_uiobuf_t *, ldi_handle_t);
 static void lxpr_read_loadavg(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_meminfo(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_mounts(lxpr_node_t *, lxpr_uiobuf_t *);
@@ -149,6 +152,8 @@ static void lxpr_read_uptime(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_version(lxpr_node_t *, lxpr_uiobuf_t *);
 
 static void lxpr_read_pid_cmdline(lxpr_node_t *, lxpr_uiobuf_t *);
+static void lxpr_read_pid_comm(lxpr_node_t *, lxpr_uiobuf_t *);
+static void lxpr_read_pid_env(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_pid_limits(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_pid_maps(lxpr_node_t *, lxpr_uiobuf_t *);
 static void lxpr_read_pid_mountinfo(lxpr_node_t *, lxpr_uiobuf_t *);
@@ -208,9 +213,10 @@ extern rctl_hndl_t rc_zone_shmmax;
 
 /*
  * The maximum length of the concatenation of argument vector strings we
- * will return to the user via the branded procfs:
+ * will return to the user via the branded procfs. Likewise for the env vector.
  */
 int lxpr_maxargvlen = 4096;
+int lxpr_maxenvvlen = 4096;
 
 /*
  * The lx /proc vnode operations vector
@@ -237,6 +243,7 @@ const fs_operation_def_t lxpr_vnodeops_template[] = {
  * file contents of an lx /proc directory.
  */
 static lxpr_dirent_t lx_procdir[] = {
+	{ LXPR_CGROUPS,		"cgroups" },
 	{ LXPR_CMDLINE,		"cmdline" },
 	{ LXPR_CPUINFO,		"cpuinfo" },
 	{ LXPR_DEVICES,		"devices" },
@@ -268,6 +275,7 @@ static lxpr_dirent_t lx_procdir[] = {
  */
 static lxpr_dirent_t piddir[] = {
 	{ LXPR_PID_CMDLINE,	"cmdline" },
+	{ LXPR_PID_COMM,	"comm" },
 	{ LXPR_PID_CPU,		"cpu" },
 	{ LXPR_PID_CURDIR,	"cwd" },
 	{ LXPR_PID_ENV,		"environ" },
@@ -291,6 +299,7 @@ static lxpr_dirent_t piddir[] = {
  */
 static lxpr_dirent_t tiddir[] = {
 	{ LXPR_PID_CMDLINE,	"cmdline" },
+	{ LXPR_PID_TID_COMM,	"comm" },
 	{ LXPR_PID_CPU,		"cpu" },
 	{ LXPR_PID_CURDIR,	"cwd" },
 	{ LXPR_PID_ENV,		"environ" },
@@ -498,9 +507,10 @@ static void (*lxpr_read_function[LXPR_NFILES])() = {
 	lxpr_read_isdir,		/* /proc		*/
 	lxpr_read_isdir,		/* /proc/<pid>		*/
 	lxpr_read_pid_cmdline,		/* /proc/<pid>/cmdline	*/
+	lxpr_read_pid_comm,		/* /proc/<pid>/comm	*/
 	lxpr_read_empty,		/* /proc/<pid>/cpu	*/
 	lxpr_read_invalid,		/* /proc/<pid>/cwd	*/
-	lxpr_read_empty,		/* /proc/<pid>/environ	*/
+	lxpr_read_pid_env,		/* /proc/<pid>/environ	*/
 	lxpr_read_invalid,		/* /proc/<pid>/exe	*/
 	lxpr_read_pid_limits,		/* /proc/<pid>/limits	*/
 	lxpr_read_pid_maps,		/* /proc/<pid>/maps	*/
@@ -515,9 +525,10 @@ static void (*lxpr_read_function[LXPR_NFILES])() = {
 	lxpr_read_isdir,		/* /proc/<pid>/fd	*/
 	lxpr_read_fd,			/* /proc/<pid>/fd/nn	*/
 	lxpr_read_pid_cmdline,		/* /proc/<pid>/task/<tid>/cmdline */
+	lxpr_read_pid_comm,		/* /proc/<pid>/task/<tid>/comm	*/
 	lxpr_read_empty,		/* /proc/<pid>/task/<tid>/cpu	*/
 	lxpr_read_invalid,		/* /proc/<pid>/task/<tid>/cwd	*/
-	lxpr_read_empty,		/* /proc/<pid>/task/<tid>/environ */
+	lxpr_read_pid_env,		/* /proc/<pid>/task/<tid>/environ */
 	lxpr_read_invalid,		/* /proc/<pid>/task/<tid>/exe	*/
 	lxpr_read_pid_limits,		/* /proc/<pid>/task/<tid>/limits */
 	lxpr_read_pid_maps,		/* /proc/<pid>/task/<tid>/maps	*/
@@ -529,16 +540,17 @@ static void (*lxpr_read_function[LXPR_NFILES])() = {
 	lxpr_read_pid_tid_status,	/* /proc/<pid>/task/<tid>/status */
 	lxpr_read_isdir,		/* /proc/<pid>/task/<tid>/fd	*/
 	lxpr_read_fd,			/* /proc/<pid>/task/<tid>/fd/nn	*/
+	lxpr_read_cgroups,		/* /proc/cgroups	*/
 	lxpr_read_empty,		/* /proc/cmdline	*/
 	lxpr_read_cpuinfo,		/* /proc/cpuinfo	*/
 	lxpr_read_empty,		/* /proc/devices	*/
 	lxpr_read_diskstats,		/* /proc/diskstats	*/
 	lxpr_read_empty,		/* /proc/dma		*/
-	lxpr_read_empty,		/* /proc/filesystems	*/
+	lxpr_read_filesystems,		/* /proc/filesystems	*/
 	lxpr_read_empty,		/* /proc/interrupts	*/
 	lxpr_read_empty,		/* /proc/ioports	*/
 	lxpr_read_empty,		/* /proc/kcore		*/
-	lxpr_read_kmsg,			/* /proc/kmsg		*/
+	lxpr_read_invalid,		/* /proc/kmsg -- see lxpr_read() */
 	lxpr_read_loadavg,		/* /proc/loadavg	*/
 	lxpr_read_meminfo,		/* /proc/meminfo	*/
 	lxpr_read_empty,		/* /proc/modules	*/
@@ -594,6 +606,7 @@ static vnode_t *(*lxpr_lookup_function[LXPR_NFILES])() = {
 	lxpr_lookup_procdir,		/* /proc		*/
 	lxpr_lookup_piddir,		/* /proc/<pid>		*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/cmdline	*/
+	lxpr_lookup_not_a_dir,		/* /proc/<pid>/comm	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/cpu	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/cwd	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/environ	*/
@@ -611,6 +624,7 @@ static vnode_t *(*lxpr_lookup_function[LXPR_NFILES])() = {
 	lxpr_lookup_fddir,		/* /proc/<pid>/fd	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/fd/nn	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/cmdline */
+	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/comm	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/cpu	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/cwd	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/environ */
@@ -625,6 +639,7 @@ static vnode_t *(*lxpr_lookup_function[LXPR_NFILES])() = {
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/status */
 	lxpr_lookup_fddir,		/* /proc/<pid>/task/<tid>/fd	*/
 	lxpr_lookup_not_a_dir,		/* /proc/<pid>/task/<tid>/fd/nn	*/
+	lxpr_lookup_not_a_dir,		/* /proc/cgroups	*/
 	lxpr_lookup_not_a_dir,		/* /proc/cmdline	*/
 	lxpr_lookup_not_a_dir,		/* /proc/cpuinfo	*/
 	lxpr_lookup_not_a_dir,		/* /proc/devices	*/
@@ -690,6 +705,7 @@ static int (*lxpr_readdir_function[LXPR_NFILES])() = {
 	lxpr_readdir_procdir,		/* /proc		*/
 	lxpr_readdir_piddir,		/* /proc/<pid>		*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/cmdline	*/
+	lxpr_readdir_not_a_dir,		/* /proc/<pid>/comm	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/cpu	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/cwd	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/environ	*/
@@ -707,6 +723,7 @@ static int (*lxpr_readdir_function[LXPR_NFILES])() = {
 	lxpr_readdir_fddir,		/* /proc/<pid>/fd	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/fd/nn	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/cmdline */
+	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/comm	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/cpu	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/cwd	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/environ */
@@ -721,6 +738,7 @@ static int (*lxpr_readdir_function[LXPR_NFILES])() = {
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/status */
 	lxpr_readdir_fddir,		/* /proc/<pid>/task/<tid>/fd	*/
 	lxpr_readdir_not_a_dir,		/* /proc/<pid>/task/<tid>/fd/nn	*/
+	lxpr_readdir_not_a_dir,		/* /proc/cgroups	*/
 	lxpr_readdir_not_a_dir,		/* /proc/cmdline	*/
 	lxpr_readdir_not_a_dir,		/* /proc/cpuinfo	*/
 	lxpr_readdir_not_a_dir,		/* /proc/devices	*/
@@ -803,6 +821,7 @@ lxpr_read(vnode_t *vp, uio_t *uiop, int ioflag, cred_t *cr,
 
 	if (type == LXPR_KMSG) {
 		ldi_ident_t	li = VTOLXPM(vp)->lxprm_li;
+		ldi_handle_t	ldih;
 		struct strioctl	str;
 		int		rv;
 
@@ -810,8 +829,8 @@ lxpr_read(vnode_t *vp, uio_t *uiop, int ioflag, cred_t *cr,
 		 * Open the zone's console device using the layered driver
 		 * interface.
 		 */
-		if ((error = ldi_open_by_name("/dev/log", FREAD, cr,
-		    &lxpnp->lxpr_cons_ldih, li)) != 0)
+		if ((error =
+		    ldi_open_by_name("/dev/log", FREAD, cr, &ldih, li)) != 0)
 			return (error);
 
 		/*
@@ -822,16 +841,16 @@ lxpr_read(vnode_t *vp, uio_t *uiop, int ioflag, cred_t *cr,
 		str.ic_timout = 0;
 		str.ic_len = 0;
 		str.ic_dp = NULL;
-		if ((error = ldi_ioctl(lxpnp->lxpr_cons_ldih, I_STR,
+		if ((error = ldi_ioctl(ldih, I_STR,
 		    (intptr_t)&str, FKIOCTL, cr, &rv)) != 0)
 			return (error);
-	}
 
-	lxpr_read_function[type](lxpnp, uiobuf);
+		lxpr_read_kmsg(lxpnp, uiobuf, ldih);
 
-	if (type == LXPR_KMSG) {
-		if ((error = ldi_close(lxpnp->lxpr_cons_ldih, FREAD, cr)) != 0)
+		if ((error = ldi_close(ldih, FREAD, cr)) != 0)
 			return (error);
+	} else {
+		lxpr_read_function[type](lxpnp, uiobuf);
 	}
 
 	error = lxpr_uiobuf_flush(uiobuf);
@@ -893,6 +912,60 @@ lxpr_read_pid_cmdline(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 	}
 
 	if (prreadargv(p, buf, asz, &sz) != 0) {
+		lxpr_uiobuf_seterr(uiobuf, EINVAL);
+	} else {
+		lxpr_uiobuf_write(uiobuf, buf, sz);
+	}
+
+	lxpr_unlock(p);
+	kmem_free(buf, asz);
+}
+
+/*
+ * lxpr_read_pid_comm(): read command from process
+ */
+static void
+lxpr_read_pid_comm(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
+{
+	proc_t *p;
+
+	VERIFY(lxpnp->lxpr_type == LXPR_PID_COMM ||
+	    lxpnp->lxpr_type == LXPR_PID_COMM);
+
+	/*
+	 * Because prctl(PR_SET_NAME) does not set custom names for threads
+	 * (vs processes), there is no need for special handling here.
+	 */
+	if ((p = lxpr_lock(lxpnp->lxpr_pid)) == NULL) {
+		lxpr_uiobuf_seterr(uiobuf, EINVAL);
+		return;
+	}
+	lxpr_uiobuf_printf(uiobuf, "%s\n", p->p_user.u_comm);
+	lxpr_unlock(p);
+}
+
+/*
+ * lxpr_read_pid_env(): read env vector from process
+ */
+static void
+lxpr_read_pid_env(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
+{
+	proc_t *p;
+	char *buf;
+	size_t asz = lxpr_maxenvvlen, sz;
+
+	ASSERT(lxpnp->lxpr_type == LXPR_PID_ENV);
+
+	buf = kmem_alloc(asz, KM_SLEEP);
+
+	p = lxpr_lock(lxpnp->lxpr_pid);
+	if (p == NULL) {
+		lxpr_uiobuf_seterr(uiobuf, EINVAL);
+		kmem_free(buf, asz);
+		return;
+	}
+
+	if (prreadenvv(p, buf, asz, &sz) != 0) {
 		lxpr_uiobuf_seterr(uiobuf, EINVAL);
 	} else {
 		lxpr_uiobuf_write(uiobuf, buf, sz);
@@ -1306,41 +1379,6 @@ lxpr_read_pid_statm(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 }
 
 /*
- * Derived from procfs prgetxmap32
- */
-static size_t
-get_locked(proc_t *p)
-{
-	struct as *as = p->p_as;
-	struct seg *seg;
-	uint_t nlocked = 0;
-
-	ASSERT(as != &kas && AS_READ_HELD(as, &as->a_lock));
-
-	if ((seg = AS_SEGFIRST(as)) == NULL)
-		return (0);
-
-	do {
-		char *parr;
-		uint64_t npages;
-		uint64_t pagenum;
-
-		npages = ((uintptr_t)seg->s_size) >> PAGESHIFT;
-		parr = kmem_zalloc(npages, KM_SLEEP);
-
-		SEGOP_INCORE(seg, seg->s_base, seg->s_size, parr);
-
-		for (pagenum = 0; pagenum < npages; pagenum++) {
-			if (parr[pagenum] & SEG_PAGE_LOCKED)
-				nlocked++;
-		}
-		kmem_free(parr, npages);
-	} while ((seg = AS_SEGNEXT(as, seg)) != NULL);
-
-	return (nlocked);
-}
-
-/*
  * Look for either the main thread (lookup_id is 0) or the specified thread.
  * If we're looking for the main thread but the proc does not have one, we
  * fallback to using prchoose to get any thread available.
@@ -1420,9 +1458,6 @@ lxpr_read_status_common(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf,
 	struct as *as;
 	char *status;
 	pid_t pid, ppid;
-	size_t vsize;
-	size_t nlocked;
-	size_t rss;
 	k_sigset_t current, ignore, handle;
 	int    i, lx_sig;
 	pid_t real_pid;
@@ -1537,13 +1572,15 @@ lxpr_read_status_common(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf,
 
 	as = p->p_as;
 	if ((p->p_stat != SZOMB) && !(p->p_flag & SSYS) && (as != &kas)) {
+		size_t vsize, nlocked, rss;
+
 		mutex_exit(&p->p_lock);
 		AS_LOCK_ENTER(as, &as->a_lock, RW_READER);
 		vsize = as->a_resvsize;
 		rss = rm_asrss(as);
-		nlocked = get_locked(p);
 		AS_LOCK_EXIT(as, &as->a_lock);
 		mutex_enter(&p->p_lock);
+		nlocked = p->p_locked_mem;
 
 		lxpr_uiobuf_printf(uiobuf,
 		    "\n"
@@ -1555,7 +1592,7 @@ lxpr_read_status_common(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf,
 		    "VmExe:\t%8lu kB\n"
 		    "VmLib:\t%8lu kB",
 		    btok(vsize),
-		    ptok(nlocked),
+		    btok(nlocked),
 		    ptok(rss),
 		    0l,
 		    btok(p->p_stksize),
@@ -1967,7 +2004,7 @@ lxpr_read_net_dev(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 				continue;
 
 			/* Overwriting the name is ok in the local snapshot */
-			lx_ifname_convert(ksr[i].ks_name, LX_IFNAME_FROMNATIVE);
+			lx_ifname_convert(ksr[i].ks_name, LX_IF_FROMNATIVE);
 			lxpr_uiobuf_printf(uiobuf, "%6s: %7llu %7llu %4lu "
 			    "%4lu %4u %5u %10u %9lu %8llu %7llu %4lu %4lu %4u "
 			    "%5lu %7u %10u\n",
@@ -2033,7 +2070,7 @@ lxpr_read_net_if_inet6(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 			int flag = 0x80;
 
 			ipif_get_name(ipif, ifname, sizeof (ifname));
-			lx_ifname_convert(ifname, LX_IFNAME_FROMNATIVE);
+			lx_ifname_convert(ifname, LX_IF_FROMNATIVE);
 			lxpr_inet6_out(&ipif->ipif_v6lcl_addr, ip6out);
 			/* Scope output is shifted on Linux */
 			scope = scope << 4;
@@ -2090,7 +2127,7 @@ lxpr_format_route_ipv6(ire_t *ire, lxpr_uiobuf_t *uiobuf)
 
 	if (ire->ire_ill != NULL) {
 		ill_get_name(ire->ire_ill, name, sizeof (name));
-		lx_ifname_convert(name, LX_IFNAME_FROMNATIVE);
+		lx_ifname_convert(name, LX_IF_FROMNATIVE);
 	} else {
 		name[0] = '\0';
 	}
@@ -2176,7 +2213,7 @@ lxpr_format_route_ipv4(ire_t *ire, lxpr_uiobuf_t *uiobuf)
 	} while (ill == NULL && nire != NULL);
 	if (ill != NULL) {
 		ill_get_name(ill, name, sizeof (name));
-		lx_ifname_convert(name, LX_IFNAME_FROMNATIVE);
+		lx_ifname_convert(name, LX_IF_FROMNATIVE);
 	} else {
 		name[0] = '*';
 		name[1] = '\0';
@@ -2720,10 +2757,13 @@ lxpr_read_net_unix(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 		mutex_enter(&so->so_lock);
 		sti = _SOTOTPI(so);
 
-		if (sti->sti_laddr_sa != NULL)
+		if (sti->sti_laddr_sa != NULL &&
+		    sti->sti_laddr_len > 0) {
 			name = sti->sti_laddr_sa->sa_data;
-		else if (sti->sti_faddr_sa != NULL)
+		} else if (sti->sti_faddr_sa != NULL &&
+		    sti->sti_faddr_len > 0) {
 			name = sti->sti_faddr_sa->sa_data;
+		}
 
 		/*
 		 * Derived from enum values in Linux kernel source:
@@ -2790,9 +2830,8 @@ lxpr_read_net_unix(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 #define	LX_KMSG_PRI	"<0>"
 
 static void
-lxpr_read_kmsg(lxpr_node_t *lxpnp, struct lxpr_uiobuf *uiobuf)
+lxpr_read_kmsg(lxpr_node_t *lxpnp, struct lxpr_uiobuf *uiobuf, ldi_handle_t lh)
 {
-	ldi_handle_t	lh = lxpnp->lxpr_cons_ldih;
 	mblk_t		*mp;
 	timestruc_t	to;
 	timestruc_t	*tp = NULL;
@@ -3678,6 +3717,24 @@ static const char *intc_ecx[] = {
 	NULL,	"cx16",	"xtpr"
 };
 
+/*
+ * Report a list of each cgroup subsystem supported by our emulated cgroup fs.
+ * This needs to exist for systemd to run but for now we don't report any
+ * cgroup subsystems as being installed. The commented example below shows
+ * how to print a subsystem entry.
+ */
+static void
+lxpr_read_cgroups(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
+{
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\t%s\t%s\n",
+	    "#subsys_name", "hierarchy", "num_cgroups", "enabled");
+
+	/*
+	 * lxpr_uiobuf_printf(uiobuf, "%s\t%s\t%s\t%s\n",
+	 *   "cpu,cpuacct", "2", "1", "1");
+	 */
+}
+
 static void
 lxpr_read_cpuinfo(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 {
@@ -3844,6 +3901,22 @@ lxpr_read_fd(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
 {
 	ASSERT(lxpnp->lxpr_type == LXPR_PID_FD_FD);
 	lxpr_uiobuf_seterr(uiobuf, EFAULT);
+}
+
+/*
+ * Report a list of file systems loaded in the kernel. We only report the ones
+ * which we support and which may be checked by various components to see if
+ * they are loaded.
+ */
+static void
+lxpr_read_filesystems(lxpr_node_t *lxpnp, lxpr_uiobuf_t *uiobuf)
+{
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\n", "nodev", "autofs");
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\n", "nodev", "cgroup");
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\n", "nodev", "nfs");
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\n", "nodev", "proc");
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\n", "nodev", "sysfs");
+	lxpr_uiobuf_printf(uiobuf, "%s\t%s\n", "nodev", "tmpfs");
 }
 
 /*
@@ -4548,13 +4621,13 @@ lxpr_readdir_common(lxpr_node_t *lxpnp, uio_t *uiop, int *eofp,
 			dirent->d_name[2] = '\0';
 			reclen = DIRENT64_RECLEN(2);
 
-		} else if (dirindex < dirtablen) {
+		} else if (dirindex >= 0 && dirindex < dirtablen) {
 			int slen = strlen(dirtab[dirindex].d_name);
 
 			dirent->d_ino = lxpr_inode(dirtab[dirindex].d_type,
 			    lxpnp->lxpr_pid, 0);
 
-			ASSERT(slen < LXPNSIZ);
+			VERIFY(slen < LXPNSIZ);
 			(void) strcpy(dirent->d_name, dirtab[dirindex].d_name);
 			reclen = DIRENT64_RECLEN(slen);
 
@@ -4658,7 +4731,7 @@ lxpr_readdir_procdir(lxpr_node_t *lxpnp, uio_t *uiop, int *eofp)
 		 * Stop when entire proc table has been examined.
 		 */
 		i = (uoffset / LXPR_SDSIZE) - 2 - PROCDIRFILES;
-		if (i >= v.v_proc) {
+		if (i < 0 || i >= v.v_proc) {
 			/* Run out of table entries */
 			if (eofp) {
 				*eofp = 1;
@@ -4862,7 +4935,7 @@ lxpr_readdir_taskdir(lxpr_node_t *lxpnp, uio_t *uiop, int *eofp)
 		 * Stop at the end of the thread list
 		 */
 		i = (uoffset / LXPR_SDSIZE) - 2;
-		if (i >= tiddirsize) {
+		if (i < 0 || i >= tiddirsize) {
 			if (eofp) {
 				*eofp = 1;
 			}
@@ -5034,7 +5107,7 @@ lxpr_readdir_fddir(lxpr_node_t *lxpnp, uio_t *uiop, int *eofp)
 		 * Stop at the end of the fd list
 		 */
 		fd = (uoffset / LXPR_SDSIZE) - 2;
-		if (fd >= fddirsize) {
+		if (fd < 0 || fd >= fddirsize) {
 			if (eofp) {
 				*eofp = 1;
 			}

@@ -1,3 +1,16 @@
+#
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
+#
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# http://www.illumos.org/license/CDDL.
+#
+
+# Copyright 2015, Joyent, Inc.
+
 # Broken tests
 poll02		# OS-3997
 
@@ -73,7 +86,7 @@ swapoff01
 swapoff02
 swapon01
 swapon02
-swapon03        
+swapon03
 switch01
 ustat01
 ustat02
@@ -114,10 +127,6 @@ add_key02
 clone02
 clone08
 crash02
-eventfd01
-eventfd2_01
-eventfd2_02
-eventfd2_03
 fallocate01
 fallocate01
 fallocate01
@@ -138,7 +147,7 @@ fcntl26_64
 fcntl30
 fcntl30_64
 fcntl31
-fcntl31_64     
+fcntl31_64
 fork05
 fork09
 fork13
@@ -148,13 +157,12 @@ ftruncate04_64
 getdents02
 getdents02_64
 get_mempolicy01
-get_robust_list01
 ioctl03
 io_cancel01
 io_destroy01
 io_getevents01
 io_setup01
-io_submit01 
+io_submit01
 keyctl01
 mmap13
 mq_notify01
@@ -178,9 +186,6 @@ process_vm_readv03
 process_vm_writev01
 process_vm_writev02
 prot_hsymlinks
-ptrace01		# OS-3915
-ptrace02
-ptrace05		# OS-3307
 read02
 readahead01
 readahead02
@@ -188,9 +193,9 @@ readdir2
 readdir21
 sched_rr_get_interval01
 sched_rr_get_interval02
-sched_rr_get_interval03   
+sched_rr_get_interval03
 sched_getscheduler01
-sched_getscheduler02 
+sched_getscheduler02
 semctl01
 semop02
 sendfile02		# OS-3296
@@ -209,18 +214,11 @@ setpgid02
 setregid02
 setregid02_16
 setrlimit01
-set_robust_list01	# OS-3224
 setxattr01
 setxattr02
 setxattr03
 sgetmask01
 shmget05		# OS-3326
-sighold02		# OS-3307
-signal_test_05
-signalfd01
-signalfd4_01
-signalfd4_02
-sigrelse01		# OS-3307
 splice01
 splice02
 splice03
@@ -245,12 +243,6 @@ syslog11
 syslog12
 tee01
 tee02
-timerfd01
-timerfd02
-timerfd03
-timerfd_create01
-timerfd_gettime01
-timerfd_settime01
 unshare01
 utimensat01		# OS-3328
 unshare02

@@ -19,11 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
  */
 
 #include <sys/types.h>
+#include <sys/conf.h>
 #include <sys/ddi.h>
 #include <sys/modctl.h>
 #include <sys/cred.h>
@@ -33,6 +34,10 @@
 #include <sys/cmn_err.h>
 #include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_ioctl.h>
+
+#ifdef	_FAKE_KERNEL
+#error	"See libfksmbsrv"
+#endif	/* _FAKE_KERNEL */
 
 static int smb_drv_open(dev_t *, int, int, cred_t *);
 static int smb_drv_close(dev_t, int, int, cred_t *);
@@ -56,8 +61,6 @@ static int smb_drv_getinfo(dev_info_t *, ddi_info_cmd_t, void *, void **);
  * with Windows NT4.0. Previous experiments with NT4.0 resulted in directory
  * listing problems so this buffer size is configurable based on the end-user
  * environment. When in doubt use 37KB.
- *
- * smb_raw_mode: read_raw and write_raw supported (1) or NOT supported (0).
  */
 int	smb_maxbufsize = SMB_NT_MAXBUF;
 int	smb_oplock_levelII = 1;
@@ -66,7 +69,6 @@ int	smb_oplock_min_timeout = OPLOCK_MIN_TIMEOUT;
 int	smb_flush_required = 1;
 int	smb_dirsymlink_enable = 1;
 int	smb_sign_debug = 0;
-int	smb_raw_mode = 0;
 int	smb_shortnames = 1;
 uint_t	smb_audit_flags =
 #ifdef	DEBUG
@@ -90,8 +92,6 @@ int	smb_opipe_threshold = 1024;
 int	smb_ssetup_timeout = (30 * 1000);
 int	smb_tcon_timeout = (30 * 1000);
 int	smb_opipe_timeout = (30 * 1000);
-
-int	smb_threshold_debug = 0;
 
 /*
  * Thread priorities used in smbsrv.  Our threads spend most of their time
@@ -178,17 +178,12 @@ _init(void)
 {
 	int rc;
 
-	if ((rc = smb_kshare_init()) != 0)
-		return (rc);
-
-	if ((rc = smb_server_svc_init()) != 0) {
-		smb_kshare_fini();
+	if ((rc = smb_server_g_init()) != 0) {
 		return (rc);
 	}
 
 	if ((rc = mod_install(&modlinkage)) != 0) {
-		smb_kshare_fini();
-		(void) smb_server_svc_fini();
+		(void) smb_server_g_fini();
 	}
 
 	return (rc);
@@ -206,8 +201,7 @@ _fini(void)
 	int	rc;
 
 	if ((rc = mod_remove(&modlinkage)) == 0) {
-		rc = smb_server_svc_fini();
-		smb_kshare_fini();
+		rc = smb_server_g_fini();
 	}
 
 	return (rc);
@@ -220,13 +214,25 @@ _fini(void)
  */
 /* ARGSUSED */
 static int
-smb_drv_open(dev_t *devp, int flag, int otyp, cred_t *credp)
+smb_drv_open(dev_t *devp, int flag, int otyp, cred_t *cr)
 {
+	zoneid_t zid;
+
 	/*
 	 * Check caller's privileges.
 	 */
-	if (secpolicy_smb(credp) != 0)
+	if (secpolicy_smb(cr) != 0)
 		return (EPERM);
+
+	/*
+	 * We need a unique minor per zone otherwise an smbd in any other
+	 * zone will keep this minor open and we won't get a close call.
+	 * The zone ID is good enough as a minor number.
+	 */
+	zid = crgetzoneid(cr);
+	if (zid < 0)
+		return (ENODEV);
+	*devp = makedevice(getmajor(*devp), zid);
 
 	/*
 	 * Start SMB service state machine

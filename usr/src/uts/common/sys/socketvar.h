@@ -36,6 +36,9 @@
  * software developed by the University of California, Berkeley, and its
  * contributors.
  */
+/*
+ * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+ */
 
 #ifndef _SYS_SOCKETVAR_H
 #define	_SYS_SOCKETVAR_H
@@ -300,15 +303,16 @@ struct sonode {
 #define	SS_OOBPEND		0x00002000 /* OOB pending or present - poll */
 #define	SS_HAVEOOBDATA		0x00004000 /* OOB data present */
 #define	SS_HADOOBDATA		0x00008000 /* OOB data consumed */
-#define	SS_CLOSING		0x00010000 /* in process of closing */
 
+#define	SS_CLOSING		0x00010000 /* in process of closing */
 #define	SS_FIL_DEFER		0x00020000 /* filter deferred notification */
 #define	SS_FILOP_OK		0x00040000 /* socket can attach filters */
 #define	SS_FIL_RCV_FLOWCTRL	0x00080000 /* filter asserted rcv flow ctrl */
+
 #define	SS_FIL_SND_FLOWCTRL	0x00100000 /* filter asserted snd flow ctrl */
 #define	SS_FIL_STOP		0x00200000 /* no more filter actions */
-
 #define	SS_SODIRECT		0x00400000 /* transport supports sodirect */
+#define	SS_FILOP_UNSF		0x00800000 /* block attaching unsafe filters */
 
 #define	SS_SENTLASTREADSIG	0x01000000 /* last rx signal has been sent */
 #define	SS_SENTLASTWRITESIG	0x02000000 /* last tx signal has been sent */
@@ -324,7 +328,8 @@ struct sonode {
 
 /*
  * Sockets that can fall back to TPI must ensure that fall back is not
- * initiated while a thread is using a socket.
+ * initiated while a thread is using a socket. Otherwise this disables all
+ * future filter attachment.
  */
 #define	SO_BLOCK_FALLBACK(so, fn)				\
 	ASSERT(MUTEX_NOT_HELD(&(so)->so_lock));			\
@@ -338,6 +343,24 @@ struct sonode {
 			(so)->so_state &= ~SS_FILOP_OK;		\
 			mutex_exit(&(so)->so_lock);		\
 		}						\
+	}
+
+/*
+ * Sockets that can fall back to TPI must ensure that fall back is not
+ * initiated while a thread is using a socket. Otherwise this disables all
+ * future unsafe filter attachment. Safe filters can still attach after
+ * we execute the function in which this macro is used.
+ */
+#define	SO_BLOCK_FALLBACK_SAFE(so, fn)				\
+	ASSERT(MUTEX_NOT_HELD(&(so)->so_lock));			\
+	rw_enter(&(so)->so_fallback_rwlock, RW_READER);		\
+	if ((so)->so_state & SS_FALLBACK_COMP) {		\
+		rw_exit(&(so)->so_fallback_rwlock);		\
+		return (fn);					\
+	} else if (((so)->so_state & SS_FILOP_UNSF) == 0) {	\
+		mutex_enter(&(so)->so_lock);			\
+		(so)->so_state |= SS_FILOP_UNSF;		\
+		mutex_exit(&(so)->so_lock);			\
 	}
 
 #define	SO_UNBLOCK_FALLBACK(so)	{			\
@@ -512,6 +535,7 @@ extern int 	sockparams_add(struct sockparams *);
 extern int	sockparams_delete(int, int, int);
 extern int	sockparams_new_filter(struct sof_entry *);
 extern void	sockparams_filter_cleanup(struct sof_entry *);
+extern int	sockparams_copyout_socktable(uintptr_t);
 
 extern void smod_init(void);
 extern void smod_add(smod_info_t *);
@@ -990,6 +1014,7 @@ struct sockinfo {
 #define	SOCKCONFIG_REMOVE_SOCK		1
 #define	SOCKCONFIG_ADD_FILTER		2
 #define	SOCKCONFIG_REMOVE_FILTER	3
+#define	SOCKCONFIG_GET_SOCKTABLE	4
 
 /*
  * Data structures for configuring socket filters.
@@ -1028,6 +1053,24 @@ struct sockconfig_filter_props {
 	sof_socktuple_t	*sfp_socktuple;
 };
 
+/*
+ * Data structures for the in-kernel socket configuration table.
+ */
+typedef struct sockconfig_socktable_entry {
+	int		se_family;
+	int		se_type;
+	int		se_protocol;
+	int		se_refcnt;
+	int		se_flags;
+	char		se_modname[MODMAXNAMELEN];
+	char		se_strdev[MAXPATHLEN];
+} sockconfig_socktable_entry_t;
+
+typedef struct sockconfig_socktable {
+	uint_t		num_of_entries;
+	sockconfig_socktable_entry_t *st_entries;
+} sockconfig_socktable_t;
+
 #ifdef	_SYSCALL32
 
 typedef struct sof_socktuple32 {
@@ -1044,6 +1087,11 @@ struct sockconfig_filter_props32 {
 	uint32_t	sfp_socktuple_cnt;
 	caddr32_t	sfp_socktuple;
 };
+
+typedef struct sockconfig_socktable32 {
+	uint_t		num_of_entries;
+	caddr32_t	st_entries;
+} sockconfig_socktable32_t;
 
 #endif	/* _SYSCALL32 */
 

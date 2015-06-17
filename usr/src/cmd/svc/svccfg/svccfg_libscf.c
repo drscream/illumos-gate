@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+ * Copyright 2015 Joyent, Inc.
  * Copyright 2012 Milan Jurik. All rights reserved.
  */
 
@@ -6765,25 +6765,23 @@ connaborted:
  * These values are added asynchronously by startd. We should not return from
  * this routine until we can verify that the property group we need is there.
  *
- * Before we go ahead and verify this, we have to ask ourselves an
- * important question: Is the early manifest service currently running?
- * Because if is running and invoked us, then the service will never get
- * a restarter property because svc.startd is blocked on EMI finishing
- * before it lets itself fully connect to svc.configd. Of course, this
- * means that this race condition is in fact impossible to 100%
- * eliminate.
+ * Before we go ahead and verify this, we have to ask ourselves an important
+ * question: Is the early manifest service currently running?  Because if it is
+ * running and it has invoked us, then the service will never get a restarter
+ * property because svc.startd is blocked on EMI finishing before it lets itself
+ * fully connect to svc.configd. Of course, this means that this race condition
+ * is in fact impossible to 100% eliminate.
  *
- * svc.startd makes sure that EMI only runs once and has succeeded by
- * checking the state of the EMI instance. If it is online it bails out
- * and makes sure that it doesn't run again. In this case, we're going
- * to do something similar, only if the state is online, then we're
- * going to actually verify. EMI always has to be present, but it
- * can be explicitly disabled to reduce the amount of damage it can cause. If
- * EMI has been disabled then we no longer have to worry about the implicit race
- * condition and can go ahead and check things. If EMI is in some tate that
- * isn't online or disabled and isn't runinng, then we assume that things are
- * rather bad and we're not going to get in your way, even if the rest of SMF
- * does.
+ * svc.startd makes sure that EMI only runs once and has succeeded by checking
+ * the state of the EMI instance. If it is online it bails out and makes sure
+ * that it doesn't run again. In this case, we're going to do something similar,
+ * only if the state is online, then we're going to actually verify. EMI always
+ * has to be present, but it can be explicitly disabled to reduce the amount of
+ * damage it can cause. If EMI has been disabled then we no longer have to worry
+ * about the implicit race condition and can go ahead and check things. If EMI
+ * is in some state that isn't online or disabled and isn't runinng, then we
+ * assume that things are rather bad and we're not going to get in your way,
+ * even if the rest of SMF does.
  *
  * Returns 0 on success or returns an errno.
  */
@@ -6797,10 +6795,14 @@ lscf_instance_verify(scf_scope_t *scope, entity_t *svc, entity_t *inst)
 
 	/*
 	 * smf_get_state does not distinguish between its different failure
-	 * modes: memory allocation failures and SMF internal failures.
+	 * modes: memory allocation failures, SMF internal failures, and a lack
+	 * of EMI entirely because it's been removed. In these cases, we're
+	 * going to be conservative and opt to say that if we don't know, better
+	 * to not block import or falsely warn to the user.
 	 */
-	if ((emi_state = smf_get_state(SCF_INSTANCE_EMI)) == NULL)
-		return (EAGAIN);
+	if ((emi_state = smf_get_state(SCF_INSTANCE_EMI)) == NULL) {
+		return (0);
+	}
 
 	/*
 	 * As per the block comment for this function check the state of EMI
@@ -8270,6 +8272,7 @@ lscf_bundle_import(bundle_t *bndl, const char *filename, uint_t flags)
 
 	if (uu_list_walk(bndl->sc_bundle_services, lscf_service_import,
 	    &cbdata, UU_DEFAULT) == 0) {
+		char *eptr;
 		/* Success.  Refresh everything. */
 
 		if (flags & SCI_NOREFRESH || no_refresh) {
@@ -8338,16 +8341,25 @@ lscf_bundle_import(bundle_t *bndl, const char *filename, uint_t flags)
 		 * This snippet of code assumes that we are running svccfg as we
 		 * normally do -- witih svc.startd running. Of course, that is
 		 * not actually the case all the time because we also use a
-		 * varient of svc.configd and svcccfg which are only meant to
+		 * varient of svc.configd and svccfg which are only meant to
 		 * run during the build process. During this time we have no
 		 * svc.startd, so this check would hang the build process.
+		 *
+		 * However, we've also given other consolidations, a bit of a
+		 * means to tie themselves into a knot. They're not properly
+		 * using the native build equivalents, but they've been getting
+		 * away with it anyways. Therefore, if we've found that
+		 * SVCCFG_REPOSITORY is set indicating that a separate configd
+		 * should be spun up, then we have to assume it's not using a
+		 * startd and we should not do this check.
 		 */
 #ifndef NATIVE_BUILD
 		/*
 		 * Verify that the restarter group is preset
 		 */
+		eptr = getenv("SVCCFG_REPOSITORY");
 		for (svc = uu_list_first(bndl->sc_bundle_services);
-		    svc != NULL;
+		    svc != NULL && eptr == NULL;
 		    svc = uu_list_next(bndl->sc_bundle_services, svc)) {
 
 			insts = svc->sc_u.sc_service.sc_service_instances;

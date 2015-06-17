@@ -31,7 +31,7 @@
 #define	_LX_AUTOFS_H
 
 /*
- * The lx_autofs filesystem exists to emulate the Linux autofs filesystem
+ * The lxautofs filesystem exists to emulate the Linux autofs filesystem
  * and provide support for the Linux "automount" automounter.
  *
  *
@@ -46,7 +46,7 @@
  * kernel to the "amd" process via rpc.  "amd" then looks up any information
  * required to resolve the requests, mounts real NFS filesystems if
  * necessary, and returns.  "amd" has it's own strange configuration
- * mechanism that doesn't seem to be very compatabile with Solaris's network
+ * mechanism that doesn't seem to be very compatabile with Illumos's network
  * based automounter map support.
  *
  * 2) "automount" is the other Linux automounter.  It utilizes a kernel
@@ -67,10 +67,12 @@
  * +++ Linux autofs (and automount daemon) notes
  *
  * Since we're mimicking the behavior of the Linux autofs filesystem it's
- * important to document some of it's observed behavior here since there's
- * no doubt that in the future this behavior will change.  These comments
- * apply to the behavior of the automounter as observed on a system
- * running Linux v2.4.21 (autofs is bundled with the Linux kernel).
+ * important to document some of it's observed behavior here. There are
+ * multiple versions if the autofs kernel API protocol and most modern
+ * implemenations of the user-land automount daemon depend on v5, but these
+ * comments start by describing the general behavior available with v2.
+ * The mounting behavior is similar for v2 vs. v5 although the ioctl and
+ * protocol format is different.
  *
  * A) Autofs allows root owned, non-automounter processes to create
  * directories in the autofs filesystem.  The autofs filesystem treats the
@@ -86,14 +88,14 @@
  * C) Autofs only intercepts vop lookup operations.  Notably, it does _not_
  * intercept and re-direct vop readdir operations.  This means that the
  * observed behavior of the Linux automounter can be considerably different
- * from that of the Solaris automounter.  Specifically, on Solaris if autofs
+ * from that of the Illumos automounter.  Specifically, on Illumos if autofs
  * mount point is mounted _without_ the -nobrowse option then if a user does
  * an ls operation (which translates into a vop readdir operation) then the
  * automounter will intercept that operation and list all the possible
  * directories and mount points without actually mounting any filesystems.
  * Essentially, all automounter managed mount points on Linux will behave
- * like "-nobrowse" mount points on Solaris.  Here's an example to
- * illustrate this.  If /ws was mounted on Solaris without the -nobrowse
+ * like "-nobrowse" mount points on Illumos.  Here's an example to
+ * illustrate this.  If /ws was mounted on Illumos without the -nobrowse
  * option and an auto_ws yp map was setup as the backing store for this
  * mount point, then an "ls /ws" would list all the keys in the map as
  * valid directories, but an "ls /ws" on Linux would list an emptry
@@ -112,7 +114,7 @@
  * 	mkdir /net/mcescher/var/core
  * 	mount mcescher:/var/crash /var/crash
  * 	mount mcescher:/var/crash /var/core
- * once the automounter compleated the work above it would signal the autofs
+ * once the automounter completed the work above it would signal the autofs
  * filesystem (via an ioctl) that the lookup could continue.
  *
  * E.1) Autofs only redirects vop lookup operations for path entries that
@@ -141,33 +143,39 @@
  * request and the lookup will fail.
  *
  * F) The autofs filesystem communication protocol (what ioctls it supports
- * and what data it passes to the automount process) are versioned.  The
- * source for the userland automount daemon (i looked at version v3.1.7)
- * seemed to support two versions of the Linux kernel autofs implementation.
- * Both versions supported communiciation with a pipe and the format of the
- * structure passed via this pipe was the same.  The difference between the
- * two versions was in the functionality supported.  (The v3 version has
- * additional ioctls to support automount timeouts.)
+ * and what data it passes to the automount process) are versioned. The
+ * userland automount daemon (as of version v5.0.7) expects v5 of the protocol
+ * (by running the AUTOFS_IOC_PROTOSUBVER ioctl), and exits if that is not
+ * supported. For v2-v5 the structure passed through the pipe always begins
+ * with a common header followed by different fields depending on the packet
+ * type. In addition the different versions support additional ioctls.
  *
+ * v2 - basic mount request
+ * v3 - adds expiring (umounting)
+ * v4 - adds expire multi
+ * v5 - adds missing indirect, expire indirect, missing direct & expire direct.
+ *      Defines a new protocol structure layout.
+ *      The v5 'missing indirect' and 'missing direct' ioctls are analogous to
+ *      the v2 'missing' ioctl. These ioctls are used to initiate a mount.
  *
+ * +++ lxautofs notes
  *
- * +++ lx_autofs notes
- *
- * 1) In general, the lx_autofs filesystem tries to mimic the behavior of the
+ * 1) In general, the lxautofs filesystem tries to mimic the behavior of the
  * Linux autofs filesystem with the following exceptions:
  *
  * 	1.1) We don't bother to implement the E.3 functionality listed above
  * 	since it doesn't appear to be of any use.
  *
- * 	1.2) We only implement v2 of the automounter protocol since
- * 	implementing v3 would take a _lot_ more work.  If this proves to be a
- * 	problem we can re-visit this decision later.  (More details about v3
- * 	support are included in comments below.)
+ * 	1.2) We only fully implement v2 of the autofs protocol and only
+ *	implement the mount ioctls from v5. Fully implementing v3-v5 would take
+ *	a _lot_ more work (this is primarily around unmounting). If this proves
+ *	to be a problem we can re-visit this decision later. (More details
+ *	about post-v2 support are included in comments below.)
  *
- * 2) In general, the approach taken for lx_autofs is to keep it as simple
+ * 2) In general, the approach taken for lxautofs is to keep it as simple
  * as possible and to minimize it's memory usage.  To do this all information
- * about the contents of the lx_autofs filesystem are mirrored in the
- * underlying filesystem that lx_autofs is mounted on and most vop operations
+ * about the contents of the lxautofs filesystem are mirrored in the
+ * underlying filesystem that lxautofs is mounted on and most vop operations
  * are simply passed onto this underlying filesystem.  This means we don't
  * have to implement most the complex operations that a full filesystem
  * normally has to implement.  It also means that most of our filesystem state
@@ -176,14 +184,15 @@
  * it's requested.  For the purposes of discussion, we'll call the underlying
  * filesystem the "backing store."
  *
- * The backing store is actually directory called ".lx_afs" which is created in
- * the directory where the lx_autofs filesystem is mounted.  When the lx_autofs
- * filesystem is unmounted this backing store directory is deleted.  If this
- * directory exists at mount time (perhaps the system crashed while a previous
- * lx_autofs instance was mounted at the same location) it will be deleted.
- * There are a few implications of using a backing store worth mentioning.
+ * The backing store is actually directory called ".lxautofs" which is created
+ * in the directory where the lxautofs filesystem is mounted. When the
+ * lxautofs filesystem is unmounted this backing store directory is deleted.
+ * If this directory exists at mount time (perhaps the system crashed while a
+ * previous lxautofs instance was mounted at the same location) it will be
+ * deleted. There are a few implications of using a backing store worth
+ * mentioning.
  *
- * 	2.1) lx_autofs can't be mounted on a read only filesystem.  If this
+ * 	2.1) lxautofs can't be mounted on a read only filesystem.  If this
  * 	proves to be a problem we can probably move the location of the
  * 	backing store.
  *
@@ -210,83 +219,36 @@
  *
  * For more information on gfs take a look at the block comments in the
  * top of gfs.c
- */
-
-#ifdef	__cplusplus
-extern "C" {
-#endif
-
-/*
- * Note that the name of the actual Solaris filesystem is lx_afs and not
- * lx_autofs.  This is becase filesystem names are stupidly limited to 8
- * characters.
- */
-#define	LX_AUTOFS_NAME			"lx_afs"
-
-/*
- * Mount options supported.
- */
-#define	LX_MNTOPT_FD			"fd"
-#define	LX_MNTOPT_PGRP			"pgrp"
-#define	LX_MNTOPT_MINPROTO		"minproto"
-#define	LX_MNTOPT_MAXPROTO		"maxproto"
-#define	LX_MNTOPT_MODE			"mode"
-#define	LX_MNTOPT_SIZE			"size"
-
-/* Version of the Linux kernel automount protocol we support. */
-#define	LX_AUTOFS_PROTO_VERSION		2
-
-/*
- * Command structure sent to automount process from lx_autofs via a pipe.
- * This structure is the same for v2 and v3 of the automount protocol
- * (the communication pipe is established at mount time).
- */
-typedef struct lx_autofs_pkt {
-	int	lap_protover;	/* protocol version number */
-	int	lap_constant;	/* always set to 0 */
-	int	lap_id;		/* every pkt must have a unique id */
-	int	lap_name_len;	/* don't include newline or NULL */
-	char	lap_name[256];	/* path component to lookup */
-} lx_autofs_pkt_t;
-
-/*
- * Ioctls supprted (v2 protocol).
- */
-#define	LX_AUTOFS_IOC_READY		0x00009360 /* arg: int */
-#define	LX_AUTOFS_IOC_FAIL		0x00009361 /* arg: int */
-#define	LX_AUTOFS_IOC_CATATONIC		0x00009362 /* arg: <none> */
-
-/*
- * Ioctls not supported (v3 protocol).
  *
- * Initially we're only going to support v2 of the Linux kernel automount
- * protocol.  This means that we don't support the following ioctls.
+ * 4) v3-v5 protocol.
  *
- * 1) The protocol version ioctl (by not supporting it the automounter
- * will assume version 2).
+ * Initially we only supported v2 of the Linux kernel autofs protocol.
+ * Modern automount daemons depend on v5 so we minimally have to support the
+ * "missing" and "version" ioctls, as well as the packet format, for v5.
  *
- * 2) Automounter timeout ioctls.  For v3 and later the automounter can
- * be started with a timeout option.  It will notify the filesystem of
- * this timeout and, if any automounter filesystem root directory entry
- * is not in use, it will notify the automounter via the LX_AUTOFS_IOC_EXPIRE
- * ioctl.  For example, if the timeout is 60 seconds, the Linux
- * automounter will use the LX_AUTOFS_IOC_EXPIRE ioctl to query for
- * timeouts more often than that.  (v3.1.7 of the automount daemon would
- * perform this ioctl every <timeout>/4 seconds.)  Then, if the autofs
- * filesystem will
- * report top level directories that aren't in use to the automounter
- * via this ioctl.  If /net was managed by the automounter and
- * there were the following mount points:
+ * For v3 and later the automounter can be started with a timeout option. It
+ * will notify the filesystem of this timeout and, if any automounter
+ * filesystem root directory entry is not in use, it will notify autofs
+ * via one of the LX_AUTOFS_IOC_EXPIRE* ioctls, depending on which protocol is
+ * in use.
+ *
+ * For example, if the timeout is 60 seconds, the Linux automounter will use
+ * the LX_AUTOFS_IOC_EXPIRE ioctl to query for timeouts more often than that
+ * (v3.1.7 of the automount daemon would perform this ioctl every <timeout>/4
+ * seconds). Then, the autofs filesystem will report top level directories that
+ * aren't in use to the automounter via this ioctl. If /net was managed by the
+ * automounter and there were the following mount points:
  *	/net/jurassic/var/crash
  *	/net/mcescher/var/crash
  * and no one was looking at any crash dumps on mcescher but someone
  * was analyzing a crash dump on jurassic, then after <timeout> seconds
  * had passed the autofs filesystem would let the automounter know that
  * "mcescher" could be unmounted.  (Note the granularity of notification
- * is directories in the root of the autofs filesystem.)  Here's two
- * ideas for how this functionality could be implemented on Solaris:
+ * is directories in the root of the autofs filesystem.)
  *
- * 2.1) The easy incomplete way.  Don't do any in-use detection.  Simply
+ * Here's two ideas for how this functionality could be implemented on Illumos:
+ *
+ * 4.1) The easy incomplete way.  Don't do any in-use detection.  Simply
  * tell the automounter it can try to unmount the filesystem every time
  * the specified timeout passes.  If the filesystem is in use then the
  * unmount will fail.  This would break down for remote hosts with multiple
@@ -306,12 +268,12 @@ typedef struct lx_autofs_pkt {
  * stalled and we could resend another request to the automounter.
  * This could work if the automounter ignores mount failures.
  *
- * 2.2) The hard correct way.  The real difficulty here is detecting
+ * 4.2) The hard correct way.  The real difficulty here is detecting
  * files in use on other filesystems (say NFS) that have been mounted
  * on top of autofs.  (Detecting in use autofs vnodes should be easy.)
  * to do this we would probably have to create a new brand op to intercept
  * mount/umount filesystem operations.  Then using this entry point we
- * could detect mounts of other filesystems on top of lx_autofs.  When
+ * could detect mounts of other filesystems on top of lxautofs.  When
  * a successful mount finishes we would use the FEM (file event
  * monitoring) framework to push a module onto that filesystem and
  * intercept VOP operations that allocate/free vnodes in that filesystem.
@@ -319,16 +281,121 @@ typedef struct lx_autofs_pkt {
  * filesystem, etc.)  this would allow us to properly detect any
  * usage of subdirectories of an autofs directory.
  */
-#define	LX_AUTOFS_IOC_PROTOVER		0x80049363 /* arg: int */
-#define	LX_AUTOFS_IOC_EXPIRE		0x81109365 /* arg: lx_autofs_expire * */
-#define	LX_AUTOFS_IOC_SETTIMEOUT	0xc0049364 /* arg: ulong_t */
 
-typedef struct lx_autofs_expire {
-	int	lap_protover;	/* protol version number */
-	int	lap_constant;	/* always set to 1 */
+#ifdef	__cplusplus
+extern "C" {
+#endif
+
+/*
+ * Note that the name of the actual file system is lxautofs, not lx_autofs, but
+ * the code uses lx_autofs to prefix the various names. This is because file
+ * system names are limited to 8 characters.
+ */
+#define	LX_AUTOFS_NAME			"lxautofs"
+
+/*
+ * Mount options supported.
+ */
+#define	LX_MNTOPT_FD			"fd"
+#define	LX_MNTOPT_PGRP			"pgrp"
+#define	LX_MNTOPT_MINPROTO		"minproto"
+#define	LX_MNTOPT_MAXPROTO		"maxproto"
+#define	LX_MNTOPT_INDIRECT		"indirect"
+#define	LX_MNTOPT_DIRECT		"direct"
+
+/*
+ * Version/subversion of the Linux kernel automount protocol we support.
+ *
+ * We only fully support v2, but we also support the v5 mount requests. We'll
+ * return ENOTSUP for all of the v3-v5 ioctls we don't yet handle.
+ */
+#define	LX_AUTOFS_PROTO_VERS5		5
+#define	LX_AUTOFS_PROTO_SUBVERSION	2
+#define	LX_AUTOFS_PROTO_VERS2		2
+
+/* packet types */
+typedef enum laph_ptype {
+	LX_AUTOFS_PTYPE_MISSING,	/* 0 */
+	LX_AUTOFS_PTYPE_EXPIRE,		/* 1 */
+	LX_AUTOFS_PTYPE_EXPIRE_MULTI,	/* 2 */
+	LX_AUTOFS_PTYPE_MISSING_INDIR,	/* 3 */
+	LX_AUTOFS_PTYPE_EXPIRE_INDIR,	/* 4 */
+	LX_AUTOFS_PTYPE_MISSING_DIRECT,	/* 5 */
+	LX_AUTOFS_PTYPE_EXPIRE_DIRECT	/* 6 */
+} laph_ptype_t;
+
+/*
+ * Common header for all versions of the protocol.
+ */
+typedef struct lx_autofs_pkt_hdr {
+	int		laph_protover;	/* protocol version number */
+	laph_ptype_t	laph_type;
+	int		laph_id;	/* every pkt must have a unique id */
+} lx_autofs_pkt_hdr_t;
+
+/*
+ * Command structure sent to automount process from lxautofs via a pipe.
+ * This structure is the same for v2-v4 of the automount protocol
+ * (the communication pipe is established at mount time).
+ */
+typedef struct lx_autofs_v2_pkt {
+	lx_autofs_pkt_hdr_t lap_hdr;
 	int	lap_name_len;	/* don't include newline or NULL */
-	char	lap_name[256];	/* path component that has timed out */
-} lx_autofs_expire_t;
+	char	lap_name[256];	/* path component to lookup */
+} lx_autofs_v2_pkt_t;
+
+/* v5 */
+typedef struct lx_autofs_v5_pkt {
+	lx_autofs_pkt_hdr_t lap_hdr;
+	uint32_t lap_dev;
+	uint64_t lap_ino;
+	uint32_t lap_uid;
+	uint32_t lap_gid;
+	uint32_t lap_pid;
+	uint32_t lap_tgid;
+	uint32_t lap_name_len;
+	char	lap_name[256];
+} lx_autofs_v5_pkt_t;
+
+union lx_autofs_pkt {
+	lx_autofs_v2_pkt_t	lap_v2;
+	lx_autofs_v5_pkt_t	lap_v5;
+};
+
+#define	lap_protover	lap_v2.lap_hdr.laph_protover
+#define	lap_type	lap_v2.lap_hdr.laph_type
+#define	lap_id		lap_v2.lap_hdr.laph_id
+
+/*
+ * Ioctls fully supported (v2 protocol).
+ */
+#define	LX_AUTOFS_IOC_READY		0x00009360 /* arg: int */
+#define	LX_AUTOFS_IOC_FAIL		0x00009361 /* arg: int */
+#define	LX_AUTOFS_IOC_CATATONIC		0x00009362 /* arg: <none> */
+
+/*
+ * Ioctls supported (v3 protocol).
+ */
+#define	LX_AUTOFS_IOC_PROTOVER		0x80049363 /* arg: int */
+
+/*
+ * Ioctls not supported (v3 protocol).
+ */
+#define	LX_AUTOFS_IOC_SETTIMEOUT	0xc0049364 /* arg: ulong_t */
+#define	LX_AUTOFS_IOC_EXPIRE		0x81109365 /* arg: lx_autofs_expire * */
+
+/*
+ * Ioctls supported (v5 protocol).
+ */
+#define	LX_AUTOFS_IOC_PROTOSUBVER	0x80049367 /* arg: int */
+#define	LX_AUTOFS_IOC_ASKUMOUNT		0x80049370 /* arg: int */
+
+/*
+ * Ioctls not supported (v5 protocol).
+ */
+#define	LX_AUTOFS_IOC_EXPIRE_MULTI	0x40049366 /* arg: int */
+#define	LX_AUTOFS_IOC_EXPIRE_INDIRECT	LX_AUTOFS_IOC_EXPIRE_MULTI
+#define	LX_AUTOFS_IOC_EXPIRE_DIRECT	LX_AUTOFS_IOC_EXPIRE_MULTI
 
 #ifdef	__cplusplus
 }

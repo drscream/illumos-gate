@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+ * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
  */
 
 /*
@@ -353,7 +353,7 @@ smb_odir_openat(smb_request_t *sr, smb_node_t *unode)
 		    ERRDOS, ERROR_ACCESS_DENIED);
 		return (0);
 	}
-	cr = kcred;
+	cr = zone_kcred();
 
 	/* find the xattrdir vnode */
 	rc = smb_vop_lookup_xattrdir(unode->vp, &xattr_dvp, LOOKUP_XATTR, cr);
@@ -878,7 +878,7 @@ smb_odir_create(smb_request_t *sr, smb_node_t *dnode,
 		return (0);
 	}
 
-	od = kmem_cache_alloc(tree->t_server->si_cache_odir, KM_SLEEP);
+	od = kmem_cache_alloc(smb_cache_odir, KM_SLEEP);
 	bzero(od, sizeof (smb_odir_t));
 
 	mutex_init(&od->d_mutex, NULL, MUTEX_DEFAULT, NULL);
@@ -955,7 +955,7 @@ smb_odir_delete(void *arg)
 	smb_node_release(od->d_dnode);
 	smb_user_release(od->d_user);
 	mutex_destroy(&od->d_mutex);
-	kmem_cache_free(od->d_tree->t_server->si_cache_odir, od);
+	kmem_cache_free(smb_cache_odir, od);
 }
 
 /*
@@ -1134,7 +1134,7 @@ smb_odir_single_fileinfo(smb_request_t *sr, smb_odir_t *od,
 
 	bzero(&attr, sizeof (attr));
 	attr.sa_mask = SMB_AT_ALL;
-	rc = smb_node_getattr(sr, fnode, kcred, NULL, &attr);
+	rc = smb_node_getattr(sr, fnode, zone_kcred(), NULL, &attr);
 	if (rc != 0) {
 		smb_node_release(fnode);
 		return (rc);
@@ -1147,7 +1147,7 @@ smb_odir_single_fileinfo(smb_request_t *sr, smb_odir_t *od,
 		smb_node_release(fnode);
 		fnode = tgt_node;
 		attr.sa_mask = SMB_AT_ALL;
-		rc = smb_node_getattr(sr, fnode, kcred, NULL, &attr);
+		rc = smb_node_getattr(sr, fnode, zone_kcred(), NULL, &attr);
 		if (rc != 0) {
 			smb_node_release(fnode);
 			return (rc);
@@ -1216,6 +1216,7 @@ smb_odir_wildcard_fileinfo(smb_request_t *sr, smb_odir_t *od,
     smb_odirent_t *odirent, smb_fileinfo_t *fileinfo)
 {
 	int		rc;
+	cred_t		*cr;
 	smb_node_t	*fnode, *tgt_node;
 	smb_attr_t	attr;
 	char		*name;
@@ -1247,9 +1248,24 @@ smb_odir_wildcard_fileinfo(smb_request_t *sr, smb_odir_t *od,
 		return (ENOENT);
 	}
 
+	/*
+	 * Windows directory listings return not only names, but
+	 * also some attributes.  In Unix, you need some access to
+	 * get those attributes.  Which credential should we use to
+	 * get those?  If we're doing Access Based Enumeration (ABE)
+	 * we want this getattr to fail, which will cause the caller
+	 * to skip this entry.  If we're NOT doing ABE, we normally
+	 * want to show all the directory entries (including their
+	 * attributes) so we want this getattr to succeed!
+	 */
+	if (smb_tree_has_feature(od->d_tree, SMB_TREE_ABE))
+		cr = od->d_cred;
+	else
+		cr = zone_kcred();
+
 	bzero(&attr, sizeof (attr));
 	attr.sa_mask = SMB_AT_ALL;
-	rc = smb_node_getattr(sr, fnode, kcred, NULL, &attr);
+	rc = smb_node_getattr(NULL, fnode, cr, NULL, &attr);
 	if (rc != 0) {
 		smb_node_release(fnode);
 		return (rc);

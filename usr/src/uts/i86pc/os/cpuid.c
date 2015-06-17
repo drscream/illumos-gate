@@ -169,7 +169,8 @@ static char *x86_feature_names[NUM_X86_FEATURES] = {
 	"avx2",
 	"bmi1",
 	"bmi2",
-	"fma"
+	"fma",
+	"smep"
 };
 
 boolean_t
@@ -1245,6 +1246,9 @@ cpuid_pass1(cpu_t *cpu, uchar_t *featureset)
 			ecp->cp_ebx &= ~CPUID_INTC_EBX_7_0_BMI2;
 			ecp->cp_ebx &= ~CPUID_INTC_EBX_7_0_AVX2;
 		}
+
+		if (ecp->cp_ebx & CPUID_INTC_EBX_7_0_SMEP)
+			add_x86_feature(featureset, X86FSET_SMEP);
 	}
 
 	/*
@@ -2790,6 +2794,13 @@ cpuid_pass4(cpu_t *cpu, uint_t *hwcap_out)
 		if (*ecx & CPUID_INTC_ECX_RDRAND)
 			hwcap_flags_2 |= AV_386_2_RDRAND;
 	}
+
+	/* Detect systems with a potential CPUID limit  */
+	if (cpi->cpi_vendor == X86_VENDOR_Intel && cpi->cpi_maxeax < 4) {
+		cmn_err(CE_NOTE, "CPUID limit detected, "
+		    "see the CPUID(7D) man page for details\n");
+	}
+
 
 	if (cpi->cpi_xmaxeax < 0x80000001)
 		goto pass4_done;

@@ -327,6 +327,7 @@ DRV_KMODS	+= sd
 DRV_KMODS	+= sdhost
 DRV_KMODS	+= sgen
 DRV_KMODS	+= si3124
+DRV_KMODS	+= signalfd
 DRV_KMODS	+= smbios
 DRV_KMODS	+= skd
 DRV_KMODS	+= softmac
@@ -537,9 +538,9 @@ SCHED_KMODS	+= IA RT TS RT_DPTBL TS_DPTBL FSS FX FX_DPTBL SDC
 #	File System Modules (/kernel/fs):
 #
 FS_KMODS	+= autofs cachefs ctfs dcfs dev devfs fdfs fifofs hsfs hyprlofs
-FS_KMODS	+= lofs lx_afs lx_proc lxprocfs mntfs namefs nfs objfs zfs zut
-FS_KMODS	+= pcfs procfs sockfs specfs tmpfs udfs ufs sharefs
-FS_KMODS	+= smbfs bootfs
+FS_KMODS	+= lofs lxautofs lx_proc lxprocfs mntfs namefs nfs objfs zfs zut
+FS_KMODS	+= pcfs procfs sockfs specfs tmpfs udfs ufs sharefs lx_sysfs
+FS_KMODS	+= smbfs bootfs lx_cgroup
 
 #
 #	Streams Modules (/kernel/strmod):
@@ -727,6 +728,7 @@ SOCKET_KMODS	+= socksctp
 SOCKET_KMODS    += socksdp
 SOCKET_KMODS	+= sockrds
 SOCKET_KMODS	+= ksslf
+SOCKET_KMODS	+= datafilt
 
 #
 #	kiconv modules (/kernel/kiconv):

@@ -156,7 +156,7 @@ zmutex_destroy(kmutex_t *mp)
 }
 
 void
-mutex_enter(kmutex_t *mp)
+zmutex_enter(kmutex_t *mp)
 {
 	ASSERT(mp->initialized == B_TRUE);
 	ASSERT(mp->m_owner != (void *)-1UL);
@@ -181,7 +181,7 @@ mutex_tryenter(kmutex_t *mp)
 }
 
 void
-mutex_exit(kmutex_t *mp)
+zmutex_exit(kmutex_t *mp)
 {
 	ASSERT(mp->initialized == B_TRUE);
 	ASSERT(mutex_owner(mp) == curthread);
@@ -691,11 +691,9 @@ static char ce_suffix[CE_IGNORE][2] = { "", "\n", "\n", "" };
 void
 vpanic(const char *fmt, va_list adx)
 {
-	(void) fprintf(stderr, "error: ");
-	(void) vfprintf(stderr, fmt, adx);
-	(void) fprintf(stderr, "\n");
-
-	abort();	/* think of it as a "user-level crash dump" */
+	char buf[512];
+	(void) vsnprintf(buf, 512, fmt, adx);
+	assfail(buf, NULL, 0);
 }
 
 void

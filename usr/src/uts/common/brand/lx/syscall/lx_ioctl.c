@@ -42,6 +42,12 @@
 #include <net/if_arp.h>
 #include <sys/ioccom.h>
 #include <sys/dtrace.h>
+#include <sys/ethernet.h>
+#include <sys/dlpi.h>
+#include <sys/lx_autofs.h>
+#include <sys/netstack.h>
+#include <inet/ip.h>
+#include <inet/ip_if.h>
 
 /*
  * Supported ioctls
@@ -91,6 +97,7 @@
 #define	LX_SIOCGPGRP		0x8904
 #define	LX_SIOCATMARK		0x8905
 #define	LX_SIOCGSTAMP		0x8906
+#define	LX_SIOCGIFNAME		0x8910
 #define	LX_SIOCGIFCONF		0x8912
 #define	LX_SIOCGIFFLAGS		0x8913
 #define	LX_SIOCSIFFLAGS		0x8914
@@ -386,11 +393,6 @@ typedef struct lx_ifconf64 {
 	int32_t	if_len;
 	caddr_t if_buf;
 } lx_ifconf64_t;
-
-/* Linux ARP protocol hardware identifiers */
-#define	LX_ARPHRD_ETHER		1	/* Ethernet */
-#define	LX_ARPHRD_LOOPBACK	772	/* Loopback */
-#define	LX_ARPHRD_VOID		0xffff	/* Unknown */
 
 
 /* Generic translators */
@@ -786,25 +788,6 @@ ict_siocatmark(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 	return (0);
 }
 
-static void
-ict_convert_ifflags(uint64_t *flags, boolean_t tonative)
-{
-	uint64_t buf;
-	buf = *flags & (IFF_UP | IFF_BROADCAST | IFF_DEBUG |
-	    IFF_LOOPBACK | IFF_POINTOPOINT | IFF_NOTRAILERS |
-	    IFF_RUNNING | IFF_NOARP | IFF_PROMISC | IFF_ALLMULTI);
-
-	/* Linux has different shift for multicast flag */
-	if (tonative == B_TRUE) {
-		if (*flags & 0x1000)
-			buf |= IFF_MULTICAST;
-	} else {
-		if (*flags & IFF_MULTICAST)
-			buf |= 0x1000;
-	}
-	*flags = buf;
-}
-
 static int
 ict_if_ioctl(vnode_t *vn, int cmd, intptr_t arg, int flags, cred_t *cred)
 {
@@ -830,6 +813,89 @@ ict_if_ioctl(vnode_t *vn, int cmd, intptr_t arg, int flags, cred_t *cred)
 }
 
 static int
+ict_sioghwaddr(file_t *fp, struct lifreq *lreq)
+{
+	struct sockaddr_dl *sdl = (struct sockaddr_dl *)&lreq->lifr_addr;
+	struct sockaddr hwaddr;
+	int error, size;
+
+	error = ict_if_ioctl(fp->f_vnode, SIOCGLIFHWADDR, (intptr_t)lreq,
+	    FLFAKE(fp), fp->f_cred);
+
+	if (error == EADDRNOTAVAIL &&
+	    strncmp(lreq->lifr_name, "lo", 2) == 0) {
+		/* Emulate success on suspected loopbacks */
+		sdl->sdl_type = DL_LOOP;
+		sdl->sdl_alen = ETHERADDRL;
+		bzero(LLADDR(sdl), sdl->sdl_alen);
+		error = 0;
+	}
+
+	if (error == 0) {
+		bzero(&hwaddr, sizeof (hwaddr));
+		lx_stol_hwaddr(sdl, &hwaddr, &size);
+		bcopy(&hwaddr, &lreq->lifr_addr,
+		    size + sizeof (sdl->sdl_family));
+	}
+
+	return (error);
+}
+
+static int
+ict_siocgifname(file_t *fp, int cmd, intptr_t arg, int lxcmd)
+{
+	struct ifreq	req;
+	int		len;
+	char		name[LIFNAMSIZ];
+	netstack_t *ns;
+	ip_stack_t *ipst;
+	phyint_t *phyi;
+
+	if (fp->f_vnode->v_type != VSOCK) {
+		return (set_errno(EINVAL));
+	}
+
+	len = (curproc->p_model == DATAMODEL_LP64) ? sizeof (lx_ifreq64_t) :
+	    sizeof (lx_ifreq32_t);
+	if (copyin((struct ifreq *)arg, &req, len) != 0) {
+		return (set_errno(EFAULT));
+	}
+
+	/*
+	 * Since Linux calls this ioctl on all sorts of sockets, perform the
+	 * interface name lookup manually.
+	 */
+	if ((ns = netstack_get_current()) == NULL) {
+		return (set_errno(EINVAL));
+	}
+	ipst = ns->netstack_ip;
+
+	rw_enter(&ipst->ips_ill_g_lock, RW_READER);
+	phyi = avl_find(&ipst->ips_phyint_g_list->phyint_list_avl_by_index,
+	    (void *) &req.ifr_index, NULL);
+	if (phyi != NULL) {
+		strncpy(name, phyi->phyint_name, LIFNAMSIZ);
+		lx_ifname_convert(name, LX_IF_FROMNATIVE);
+	} else {
+		name[0] = '\0';
+	}
+
+	rw_exit(&ipst->ips_ill_g_lock);
+	netstack_rele(ns);
+
+	if (strlen(name) != 0) {
+		/* Truncate for ifreq and copyout */
+		strncpy(req.ifr_name, name, IFNAMSIZ);
+		if (copyout(&req, (struct ifreq *)arg, len) != 0) {
+			return (set_errno(EFAULT));
+		}
+		return (0);
+	}
+
+	return (set_errno(EINVAL));
+}
+
+static int
 ict_siolifreq(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 {
 	struct ifreq	req;
@@ -846,7 +912,7 @@ ict_siolifreq(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 	bzero(&lreq, sizeof (lreq));
 	strncpy(lreq.lifr_name, req.ifr_name, IFNAMSIZ);
 	bcopy(&req.ifr_ifru, &lreq.lifr_lifru, len - IFNAMSIZ);
-	lx_ifname_convert(lreq.lifr_name, LX_IFNAME_TONATIVE);
+	lx_ifname_convert(lreq.lifr_name, LX_IF_TONATIVE);
 
 	switch (cmd) {
 	case SIOCGIFADDR:
@@ -881,37 +947,16 @@ ict_siolifreq(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 		error = ict_if_ioctl(fp->f_vnode, cmd, (intptr_t)&lreq,
 		    FLFAKE(fp), fp->f_cred);
 		if (error == 0)
-			ict_convert_ifflags(&lreq.lifr_flags, B_FALSE);
+			lx_ifflags_convert(&lreq.lifr_flags, LX_IF_FROMNATIVE);
 		break;
 	case SIOCSIFFLAGS:
 		cmd = SIOCSLIFFLAGS;
-		ict_convert_ifflags(&lreq.lifr_flags, B_TRUE);
+		lx_ifflags_convert(&lreq.lifr_flags, LX_IF_TONATIVE);
 		error = ict_if_ioctl(fp->f_vnode, cmd, (intptr_t)&lreq,
 		    FLFAKE(fp), fp->f_cred);
 		break;
 	case SIOCGIFHWADDR:
-		cmd = SIOCGLIFHWADDR;
-		error = ict_if_ioctl(fp->f_vnode, cmd, (intptr_t)&lreq,
-		    FLFAKE(fp), fp->f_cred);
-		/*
-		 * SIOCGIFHWADDR on Linux sets sa_family to ARPHRD_ETHER (1) on
-		 * ethernet and ARPHRD_LOOPBACK (772) on loopback.
-		 */
-		if (error == EADDRNOTAVAIL &&
-		    strncmp(lreq.lifr_name, "lo", 2) == 0) {
-			/* Emulate success on suspected loopbacks */
-			lreq.lifr_addr.ss_family = 772;
-			error = 0;
-		} else if (error == 0) {
-			/* convert illumos sockaddr to Linux */
-			struct sockaddr_dl *src =
-			    (struct sockaddr_dl *)&lreq.lifr_addr;
-			caddr_t dst = (caddr_t)&lreq.lifr_addr +
-			    sizeof (lreq.lifr_addr.ss_family);
-			bcopy(LLADDR(src), dst, src->sdl_alen);
-			/* Default to Ethernet type for all successes */
-			lreq.lifr_addr.ss_family = 1;
-		}
+		error = ict_sioghwaddr(fp, &lreq);
 		break;
 	case LX_SIOCGIFTXQLEN:
 		/*
@@ -946,7 +991,7 @@ ict_siolifreq(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 		return (set_errno(error));
 
 	/* Convert back to a Linux ifreq */
-	lx_ifname_convert(lreq.lifr_name, LX_IFNAME_FROMNATIVE);
+	lx_ifname_convert(lreq.lifr_name, LX_IF_FROMNATIVE);
 	bzero(&req, sizeof (req));
 	strncpy(req.ifr_name, lreq.lifr_name, IFNAMSIZ);
 	bcopy(&lreq.lifr_lifru, &req.ifr_ifru, len - IFNAMSIZ);
@@ -1000,7 +1045,7 @@ ict_siocgifconf32(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 	oreq = (lx_ifreq32_t *)kmem_alloc(buf_len, KM_SLEEP);
 	for (i = 0; i < sconf.ifc_len / sizeof (struct ifreq); i++) {
 		bcopy(&sconf.ifc_req[i], oreq + i, sizeof (lx_ifreq32_t));
-		lx_ifname_convert(oreq[i].ifr_name, LX_IFNAME_FROMNATIVE);
+		lx_ifname_convert(oreq[i].ifr_name, LX_IF_FROMNATIVE);
 	}
 	conf.if_len = i * sizeof (*oreq);
 	kmem_free(sconf.ifc_req, ifcount * sizeof (struct ifreq));
@@ -1057,7 +1102,7 @@ ict_siocgifconf64(file_t *fp, int cmd, intptr_t arg, int lxcmd)
 	oreq = (lx_ifreq64_t *)kmem_alloc(buf_len, KM_SLEEP);
 	for (i = 0; i < sconf.ifc_len / sizeof (struct ifreq); i++) {
 		bcopy(&sconf.ifc_req[i], oreq + i, sizeof (lx_ifreq64_t));
-		lx_ifname_convert(oreq[i].ifr_name, LX_IFNAME_FROMNATIVE);
+		lx_ifname_convert(oreq[i].ifr_name, LX_IF_FROMNATIVE);
 	}
 	conf.if_len = i * sizeof (*oreq);
 	kmem_free(sconf.ifc_req, ifcount * sizeof (struct ifreq));
@@ -1167,11 +1212,23 @@ static ioc_cmd_translator_t ioc_translators[] = {
 	IOC_CMD_TRANSLATOR_FILTER(SIOCGIFINDEX,		ict_siolifreq)
 	IOC_CMD_TRANSLATOR_CUSTOM(LX_SIOCGIFTXQLEN,	ict_siolifreq)
 	IOC_CMD_TRANSLATOR_FILTER(SIOCGIFCONF,		ict_siocgifconf)
+	IOC_CMD_TRANSLATOR_CUSTOM(LX_SIOCGIFNAME,	ict_siocgifname)
 
 	/* dtrace related */
 	IOC_CMD_TRANSLATOR_PTHRU(DTRACEHIOC_ADD)
 	IOC_CMD_TRANSLATOR_PTHRU(DTRACEHIOC_REMOVE)
 	IOC_CMD_TRANSLATOR_PTHRU(DTRACEHIOC_ADDDOF)
+
+	/* lxautofs related - included here since no fd interpretation */
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_READY)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_FAIL)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_CATATONIC)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_PROTOVER)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_SETTIMEOUT)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_EXPIRE)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_EXPIRE_MULTI)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_PROTOSUBVER)
+	IOC_CMD_TRANSLATOR_PTHRU(LX_AUTOFS_IOC_ASKUMOUNT)
 
 	IOC_CMD_TRANSLATOR_END
 };

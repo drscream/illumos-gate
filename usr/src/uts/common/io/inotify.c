@@ -11,6 +11,7 @@
 
 /*
  * Copyright (c) 2015 Joyent, Inc.  All rights reserved.
+ * Copyright (c) 2015 The MathWorks, Inc.  All rights reserved.
  */
 
 /*
@@ -73,6 +74,7 @@ struct inotify_watch {
 	avl_tree_t inw_children;		/* children, if a parent */
 	char *inw_name;				/* name, if a child */
 	list_node_t inw_orphan;			/* orphan list */
+	cred_t *inw_cred;			/* cred, if orphaned */
 	inotify_state_t *inw_state;		/* corresponding state */
 };
 
@@ -98,7 +100,7 @@ struct inotify_state {
 	pollhead_t ins_pollhd;			/* poll head */
 	kcondvar_t ins_cv;			/* condvar for reading */
 	list_t ins_orphans;			/* orphan list */
-	cyclic_id_t ins_cleaner;		/* cyclic for cleaning */
+	ddi_periodic_t ins_cleaner;		/* cyclic for cleaning */
 	inotify_watch_t *ins_zombies;		/* zombie watch list */
 	cred_t *ins_cred;			/* creator's credentials */
 	inotify_state_t *ins_next;		/* next state on global list */
@@ -513,6 +515,9 @@ inotify_watch_event(inotify_watch_t *watch, uint64_t mask, char *name)
 	state->ins_nevents++;
 	state->ins_size += sizeof (event->ine_event) + len;
 
+	if (removal)
+		return;
+
 	if ((watch->inw_mask & IN_ONESHOT) && !watch->inw_fired) {
 		/*
 		 * If this is a one-shot, we need to remove the watch.  (Note
@@ -522,9 +527,6 @@ inotify_watch_event(inotify_watch_t *watch, uint64_t mask, char *name)
 		watch->inw_fired = 1;
 		inotify_watch_remove(state, watch);
 	}
-
-	if (removal)
-		return;
 
 	mutex_exit(&state->ins_lock);
 	pollwakeup(&state->ins_pollhd, POLLRDNORM | POLLIN);
@@ -673,8 +675,10 @@ inotify_watch_remove(inotify_state_t *state, inotify_watch_t *watch)
 		 * If this child watch has been orphaned, remove it from the
 		 * state's list of orphans.
 		 */
-		if (child->inw_orphaned)
+		if (child->inw_orphaned) {
 			list_remove(&state->ins_orphans, child);
+			crfree(child->inw_cred);
+		}
 
 		VN_RELE(child->inw_vp);
 
@@ -744,6 +748,8 @@ inotify_watch_delete(inotify_watch_t *watch, uint32_t event)
 			 */
 			if (!watch->inw_orphaned) {
 				watch->inw_orphaned = 1;
+				watch->inw_cred = CRED();
+				crhold(watch->inw_cred);
 				list_insert_head(&state->ins_orphans, watch);
 			}
 
@@ -759,6 +765,7 @@ inotify_watch_delete(inotify_watch_t *watch, uint32_t event)
 			 * the move because we don't want to spuriously
 			 * drop events if we can avoid it.
 			 */
+			crfree(watch->inw_cred);
 			list_remove(&state->ins_orphans, watch);
 		}
 	}
@@ -975,6 +982,7 @@ inotify_clean(void *arg)
 {
 	inotify_state_t *state = arg;
 	inotify_watch_t *watch, *parent, *next, **prev;
+	cred_t *savecred;
 	int err;
 
 	mutex_enter(&state->ins_lock);
@@ -995,7 +1003,17 @@ inotify_clean(void *arg)
 
 		list_remove(&state->ins_orphans, watch);
 
+		/*
+		 * For purposes of releasing the vnode, we need to switch our
+		 * cred to be the cred of the orphaning thread (which we held
+		 * at the time this watch was orphaned).
+		 */
+		savecred = curthread->t_cred;
+		curthread->t_cred = watch->inw_cred;
 		VN_RELE(watch->inw_vp);
+		crfree(watch->inw_cred);
+		curthread->t_cred = savecred;
+
 		inotify_watch_zombify(watch);
 	}
 
@@ -1025,8 +1043,6 @@ inotify_open(dev_t *devp, int flag, int otyp, cred_t *cred_p)
 	major_t major = getemajor(*devp);
 	minor_t minor = getminor(*devp);
 	int instances = 0;
-	cyc_handler_t hdlr;
-	cyc_time_t when;
 	char c[64];
 
 	if (minor != INOTIFYMNRN_INOTIFY)
@@ -1083,17 +1099,8 @@ inotify_open(dev_t *devp, int flag, int otyp, cred_t *cred_p)
 
 	mutex_exit(&inotify_lock);
 
-	mutex_enter(&cpu_lock);
-
-	hdlr.cyh_func = inotify_clean;
-	hdlr.cyh_level = CY_LOW_LEVEL;
-	hdlr.cyh_arg = state;
-
-	when.cyt_when = 0;
-	when.cyt_interval = NANOSEC;
-
-	state->ins_cleaner = cyclic_add(&hdlr, &when);
-	mutex_exit(&cpu_lock);
+	state->ins_cleaner = ddi_periodic_add(inotify_clean,
+	    state, NANOSEC, DDI_IPL_0);
 
 	return (0);
 }
@@ -1312,9 +1319,10 @@ inotify_close(dev_t dev, int flag, int otyp, cred_t *cred_p)
 		inotify_watch_destroy(watch);
 	}
 
-	mutex_enter(&cpu_lock);
-	cyclic_remove(state->ins_cleaner);
-	mutex_exit(&cpu_lock);
+	if (state->ins_cleaner != NULL) {
+		ddi_periodic_delete(state->ins_cleaner);
+		state->ins_cleaner = NULL;
+	}
 
 	mutex_enter(&inotify_lock);
 

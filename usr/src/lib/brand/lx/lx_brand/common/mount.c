@@ -80,9 +80,13 @@ mount_opt_t lx_proc_options[] = {
 	{ NULL,			MOUNT_OPT_INVALID }
 };
 
+mount_opt_t lx_sysfs_options[] = {
+	{ NULL,			MOUNT_OPT_INVALID }
+};
+
 mount_opt_t lx_tmpfs_options[] = {
-	{ LX_MNTOPT_SIZE,	MOUNT_OPT_BYTESIZE },
-	{ LX_MNTOPT_MODE,	MOUNT_OPT_UINT },
+	{ "size",		MOUNT_OPT_BYTESIZE },
+	{ "mode",		MOUNT_OPT_UINT },
 	{ NULL,			MOUNT_OPT_INVALID }
 };
 
@@ -91,6 +95,8 @@ mount_opt_t lx_autofs_options[] = {
 	{ LX_MNTOPT_PGRP,	MOUNT_OPT_UINT },
 	{ LX_MNTOPT_MINPROTO,	MOUNT_OPT_UINT },
 	{ LX_MNTOPT_MAXPROTO,	MOUNT_OPT_UINT },
+	{ LX_MNTOPT_INDIRECT,	MOUNT_OPT_NORMAL },
+	{ LX_MNTOPT_DIRECT,	MOUNT_OPT_NORMAL },
 	{ NULL,			MOUNT_OPT_INVALID }
 };
 
@@ -714,9 +720,46 @@ lx_mount(uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4,
 		    strcmp(sb.st_fstype, "lx_proc") == 0) {
 			return (0);
 		}
+	} else if (strcmp(fstype, "sysfs") == 0) {
+		/* Translate sysfs mount requests to lx_sysfs requests. */
+		(void) strcpy(fstype, "lx_sysfs");
+
+		/* Copy in Linux mount options. */
+		if (datap != NULL) {
+			rv = uucopystr((void *)datap,
+			    options, sizeof (options));
+			if ((rv == -1) || (rv == sizeof (options)))
+				return (-EFAULT);
+		}
+		lx_debug("\tlinux mount options: \"%s\"", options);
+
+		/* Verify Linux mount options. */
+		if (i_lx_opt_verify(options, lx_sysfs_options) != 0) {
+			lx_unsupported("unsupported sysfs mount options: %s",
+			    options);
+			return (-errno);
+		}
+	} else if (strcmp(fstype, "cgroup") == 0) {
+		/* Translate cgroup mount requests to lx_cgroup requests. */
+		(void) strcpy(fstype, "lx_cgroup");
+
+		/* Copy in Linux mount options. */
+		if (datap != NULL) {
+			rv = uucopystr((void *)datap,
+			    options, sizeof (options));
+			if ((rv == -1) || (rv == sizeof (options)))
+				return (-EFAULT);
+		}
+		lx_debug("\tlinux mount options: \"%s\"", options);
+
+		/*
+		 * Currently don't verify Linux mount options since we can
+		 * have asubsystem string provided.
+		 */
+
 	} else if (strcmp(fstype, "autofs") == 0) {
 
-		/* Translate autofs mount requests to lx_afs requests. */
+		/* Translate autofs mount requests to lxautofs requests. */
 		(void) strcpy(fstype, LX_AUTOFS_NAME);
 
 		/* Copy in Linux mount options. */
