@@ -870,6 +870,36 @@ lx_ptrace_setregs(lx_lwp_data_t *remote, void *uregsp)
 	}
 }
 
+static int
+lx_ptrace_getsiginfo(lx_lwp_data_t *remote, void *usiginfo)
+{
+	klwp_t *lwp = remote->br_lwp;
+	int lx_sig;
+
+	lx_sig = lx_stol_signo(lwp->lwp_cursig, 0);
+	if (lx_sig < 1 || lwp->lwp_curinfo == NULL) {
+		return (EINVAL);
+	}
+
+#if defined(_SYSCALL32_IMPL)
+	if (get_udatamodel() != DATAMODEL_NATIVE) {
+		if (stol_ksiginfo32_copyout(&lwp->lwp_curinfo->sq_info,
+		    usiginfo) != 0) {
+			return (EFAULT);
+		}
+	} else
+#endif
+	{
+		if (stol_ksiginfo_copyout(&lwp->lwp_curinfo->sq_info,
+		    usiginfo) != 0) {
+			return (EFAULT);
+		}
+	}
+
+	return (0);
+}
+
+
 /*
  * Implements the PTRACE_CONT subcommand of the Linux ptrace(2) interface.
  */
@@ -896,6 +926,7 @@ lx_ptrace_cont(lx_lwp_data_t *remote, lx_ptrace_cont_flags_t flags, int signo)
 	 * may fail silently if the state machine is not aligned correctly.
 	 */
 	remote->br_ptrace_stopsig = signo;
+	remote->br_ptrace_donesig = 0;
 
 	/*
 	 * Handle the syscall-stop flag if this is a PTRACE_SYSCALL restart:
@@ -948,6 +979,7 @@ lx_ptrace_detach(lx_ptrace_accord_t *accord, lx_lwp_data_t *remote, int signo,
 	 * or modify the delivered signal.
 	 */
 	remote->br_ptrace_stopsig = signo;
+	remote->br_ptrace_donesig = 0;
 
 	lx_ptrace_restart_lwp(rlwp);
 
@@ -1612,6 +1644,16 @@ lx_ptrace_issig_stop(proc_t *p, klwp_t *lwp)
 	if (lwpd->br_ptrace_tracer == NULL || lwp->lwp_cursig == SIGKILL ||
 	    (lwp->lwp_cursig == 0 || lwp->lwp_cursig > NSIG) ||
 	    (lx_sig = stol_signo[lwp->lwp_cursig]) < 1) {
+		if (lwp->lwp_cursig == 0) {
+			/*
+			 * If this lwp has no current signal, it means that any
+			 * signal ignorance enabled by br_ptrace_donesig has
+			 * already taken place (the signal was consumed).
+			 * By clearing donesig, we declare desire to ignore no
+			 * signals for accurate ptracing.
+			 */
+			lwpd->br_ptrace_donesig = 0;
+		}
 		return (0);
 	}
 
@@ -1620,6 +1662,7 @@ lx_ptrace_issig_stop(proc_t *p, klwp_t *lwp)
 	 * and enter the ptrace "signal-delivery-stop" condition.
 	 */
 	lwpd->br_ptrace_stopsig = lx_sig;
+	lwpd->br_ptrace_donesig = 0;
 	(void) lx_ptrace_stop_common(p, lwpd, LX_PR_SIGNALLED);
 	mutex_enter(&p->p_lock);
 
@@ -1670,21 +1713,46 @@ lx_ptrace_issig_stop(proc_t *p, klwp_t *lwp)
 		}
 	}
 
+	lwpd->br_ptrace_donesig = lwp->lwp_cursig;
 	lwpd->br_ptrace_stopsig = 0;
 	return (0);
 }
 
 boolean_t
-lx_ptrace_sig_ignorable(proc_t *p, int sig)
+lx_ptrace_sig_ignorable(proc_t *p, klwp_t *lwp, int sig)
 {
 	lx_proc_data_t *lxpd = ptolxproc(p);
 
+	/*
+	 * Ignored signals and ptrace:
+	 *
+	 * When a process is being ptraced by another, special care is needed
+	 * while handling signals.  Since the tracer is interested in all
+	 * signals sent to the tracee, an effort must be made to initially
+	 * bypass signal ignorance logic.  This allows the signal to be placed
+	 * in the tracee's sigqueue to be inspected and potentially altered by
+	 * the tracer.
+	 *
+	 * A critical detail in this procedure is how a signal is handled after
+	 * tracer has completed processing for the event.  If the signal would
+	 * have been ignored, were it not for the initial ptrace override, then
+	 * lx_ptrace_sig_ignorable must report B_TRUE when the tracee is
+	 * restarted and resumes signal processing.  This is done by recording
+	 * the most recent tracee signal consumed by ptrace.
+	 */
+
 	if (lxpd->l_ptrace != 0 && lx_stol_signo(sig, 0) != 0) {
 		/*
-		 * In order to preserve proper ptrace behavior when it comes to
-		 * signal handling, it is unacceptable to ignore any signals.
-		 * Doing so would bypass the logic in lx_ptrace_issig_stop.
+		 * This process is being ptraced.  Bypass signal ignorance for
+		 * anything that maps to a valid Linux signal...
 		 */
+		if (lwp != NULL && lwptolxlwp(lwp)->br_ptrace_donesig == sig) {
+			/*
+			 * ...Unless it is a signal which has already been
+			 * processed by the tracer.
+			 */
+			return (B_TRUE);
+		}
 		return (B_FALSE);
 	}
 	return (B_TRUE);
@@ -2033,6 +2101,7 @@ lx_waitid_helper(idtype_t idtype, id_t id, k_siginfo_t *ip, int options,
 	proc_t *rproc = NULL;
 	pid_t event_pid = 0, event_ppid = 0;
 	boolean_t waitflag = !(options & WNOWAIT);
+	boolean_t target_found = B_FALSE;
 
 	VERIFY(MUTEX_HELD(&pidlock));
 	VERIFY(MUTEX_NOT_HELD(&p->p_lock));
@@ -2111,6 +2180,9 @@ lx_waitid_helper(idtype_t idtype, id_t id, k_siginfo_t *ip, int options,
 			cmn_err(CE_PANIC, "unexpected idtype: %d", idtype);
 		}
 
+		/* This tracee matches provided idtype and id */
+		target_found = B_TRUE;
+
 		/*
 		 * Check if this LWP is in "ptrace-stop".  If in the correct
 		 * stop condition, lock the process containing the tracee LWP.
@@ -2150,12 +2222,13 @@ lx_waitid_helper(idtype_t idtype, id_t id, k_siginfo_t *ip, int options,
 	if (!found) {
 		/*
 		 * There were no events of interest, but we have tracees.
-		 * If specific tracee critera were not specified, signal to
-		 * waitid() that it should block if the provided flags allow
+		 * If any of the tracees matched the spcified criteria, signal
+		 * to waitid() that it should block if the provided flags allow
 		 * for it.
 		 */
-		if (idtype == P_ALL)
+		if (target_found) {
 			*brand_wants_wait = B_TRUE;
+		}
 
 		return (-1);
 	}
@@ -2327,6 +2400,10 @@ lx_ptrace_kernel(int ptrace_op, pid_t lxpid, uintptr_t addr, uintptr_t data)
 
 	case LX_PTRACE_SETREGS:
 		error = lx_ptrace_setregs(remote, (void *)data);
+		break;
+
+	case LX_PTRACE_GETSIGINFO:
+		error = lx_ptrace_getsiginfo(remote, (void *)data);
 		break;
 
 	default:

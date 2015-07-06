@@ -851,7 +851,7 @@ lx_sysent_t lx_sysent32[] = {
 	{"signalfd",	NULL,			0,		3}, /* 321 */
 	{"timerfd_create", NULL,		0,		2}, /* 322 */
 	{"eventfd",	NULL,			0,		1}, /* 323 */
-	{"fallocate",	NULL,			NOSYS_NULL,	0}, /* 324 */
+	{"fallocate",	lx_fallocate,		0,		4}, /* 324 */
 	{"timerfd_settime", NULL,		0,		4}, /* 325 */
 	{"timerfd_gettime", NULL,		0,		2}, /* 326 */
 	{"signalfd4",	NULL,			0,		4}, /* 327 */
@@ -871,7 +871,7 @@ lx_sysent_t lx_sysent32[] = {
 	{"name_to_handle_at", NULL,		NOSYS_NULL,	0}, /* 341 */
 	{"open_by_handle_at", NULL,		NOSYS_NULL,	0}, /* 342 */
 	{"clock_adjtime", NULL,			NOSYS_NULL,	0}, /* 343 */
-	{"syncfs",	NULL,			NOSYS_NULL,	0}, /* 344 */
+	{"syncfs",	lx_syncfs,		0,		1}, /* 344 */
 	{"sendmmsg",	NULL,			NOSYS_NULL,	0}, /* 345 */
 	{"setns",	NULL,			NOSYS_NULL,	0}, /* 346 */
 	{"process_vm_readv", NULL,		NOSYS_NULL,	0}, /* 347 */
@@ -938,10 +938,10 @@ lx_sysent_t lx_sysent64[] = {
 	{"socket",	NULL,			0,		3}, /* 41 */
 	{"connect",	lx_connect,		0,		3}, /* 42 */
 	{"accept",	NULL,			0,		3}, /* 43 */
-	{"sendto",	NULL,			0,		6}, /* 44 */
-	{"recvfrom",	NULL,			0,		6}, /* 45 */
-	{"sendmsg",	NULL,			0,		3}, /* 46 */
-	{"recvmsg",	NULL,			0,		3}, /* 47 */
+	{"sendto",	lx_sendto,		0,		6}, /* 44 */
+	{"recvfrom",	lx_recvfrom,		0,		6}, /* 45 */
+	{"sendmsg",	lx_sendmsg,		0,		3}, /* 46 */
+	{"recvmsg",	lx_recvmsg,		0,		3}, /* 47 */
 	{"shutdown",	NULL,			0,		2}, /* 48 */
 	{"bind",	NULL,			0,		3}, /* 49 */
 	{"listen",	NULL,			0,		2}, /* 50 */
@@ -1179,7 +1179,7 @@ lx_sysent_t lx_sysent64[] = {
 	{"signalfd",	NULL,			0,		3}, /* 282 */
 	{"timerfd_create", NULL,		0,		2}, /* 283 */
 	{"eventfd",	NULL,			0,		1}, /* 284 */
-	{"fallocate",	NULL,			NOSYS_NULL,	0}, /* 285 */
+	{"fallocate",	lx_fallocate,		0,		4}, /* 285 */
 	{"timerfd_settime", NULL,		0,		4}, /* 286 */
 	{"timerfd_gettime", NULL,		0,		2}, /* 287 */
 	{"accept4",	NULL,			0,		4}, /* 288 */
@@ -1200,7 +1200,7 @@ lx_sysent_t lx_sysent64[] = {
 	{"name_to_handle_at", NULL,		NOSYS_NULL,	0}, /* 303 */
 	{"open_by_handle_at", NULL,		NOSYS_NULL,	0}, /* 304 */
 	{"clock_adjtime", NULL,			NOSYS_NULL,	0}, /* 305 */
-	{"syncfs",	NULL,			NOSYS_NULL,	0}, /* 306 */
+	{"syncfs",	lx_syncfs,		0,		1}, /* 306 */
 	{"sendmmsg",	NULL,			NOSYS_NULL,	0}, /* 307 */
 	{"setns",	NULL,			NOSYS_NULL,	0}, /* 309 */
 	{"getcpu",	lx_getcpu,		0,		3}, /* 309 */
