@@ -695,7 +695,7 @@ lx_sysent_t lx_sysent32[] = {
 	{"nfsservctl",	NULL,			NOSYS_KERNEL,	0}, /* 169 */
 	{"setresgid16",	lx_setresgid16,		0,		3}, /* 170 */
 	{"getresgid16",	NULL,			0,		3}, /* 171 */
-	{"prctl",	NULL,			0,		5}, /* 172 */
+	{"prctl",	lx_prctl,		0,		5}, /* 172 */
 	{"rt_sigreturn", NULL,			0,		0}, /* 173 */
 	{"rt_sigaction", NULL,			0,		4}, /* 174 */
 	{"rt_sigprocmask", NULL,		0,		4}, /* 175 */
@@ -851,7 +851,7 @@ lx_sysent_t lx_sysent32[] = {
 	{"signalfd",	NULL,			0,		3}, /* 321 */
 	{"timerfd_create", NULL,		0,		2}, /* 322 */
 	{"eventfd",	NULL,			0,		1}, /* 323 */
-	{"fallocate",	lx_fallocate,		0,		4}, /* 324 */
+	{"fallocate",	lx_fallocate32,		LX_SYS_EBPARG6,	6}, /* 324 */
 	{"timerfd_settime", NULL,		0,		4}, /* 325 */
 	{"timerfd_gettime", NULL,		0,		2}, /* 326 */
 	{"signalfd4",	NULL,			0,		4}, /* 327 */
@@ -1051,7 +1051,7 @@ lx_sysent_t lx_sysent64[] = {
 	{"modify_ldt",	lx_modify_ldt,		0,		3}, /* 154 */
 	{"pivot_root",	NULL,			NOSYS_KERNEL,	0}, /* 155 */
 	{"sysctl",	NULL,			0,		1}, /* 156 */
-	{"prctl",	NULL,			0,		5}, /* 157 */
+	{"prctl",	lx_prctl,		0,		5}, /* 157 */
 	{"arch_prctl",	lx_arch_prctl,		0,		2}, /* 158 */
 	{"adjtimex",	NULL,			0,		1}, /* 159 */
 	{"setrlimit",	lx_setrlimit,		0,		2}, /* 160 */
