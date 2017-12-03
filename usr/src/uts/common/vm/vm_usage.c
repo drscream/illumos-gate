@@ -25,7 +25,7 @@
  */
 
 /*
- * Copyright 2016, Joyent, Inc.
+ * Copyright 2017, Joyent, Inc.
  */
 
 /*
@@ -1669,13 +1669,42 @@ vmu_free_extra()
 
 extern kcondvar_t *pr_pid_cv;
 
+static void
+vmu_get_zone_rss(zoneid_t zid)
+{
+	vmu_zone_t *zone;
+	zone_t *zp;
+	int ret;
+	uint_t pgcnt;
+
+	if ((zp = zone_find_by_id(zid)) == NULL)
+		return;
+
+	ret = i_mod_hash_find_nosync(vmu_data.vmu_zones_hash,
+	    (mod_hash_key_t)(uintptr_t)zid, (mod_hash_val_t *)&zone);
+	if (ret != 0) {
+		zone = vmu_alloc_zone(zid);
+		ret = i_mod_hash_insert_nosync(vmu_data.vmu_zones_hash,
+		    (mod_hash_key_t)(uintptr_t)zid,
+		    (mod_hash_val_t)zone, (mod_hash_hndl_t)0);
+		ASSERT(ret == 0);
+	}
+
+	ASSERT(zid >= 0 && zid <= MAX_ZONEID);
+	pgcnt = zone_pcap_data[zid].zpcap_pg_cnt;
+	zone->vmz_zone->vme_result.vmu_rss_all = (size_t)ptob(pgcnt);
+	zone->vmz_zone->vme_result.vmu_swap_all = zp->zone_max_swap;
+
+	zone_rele(zp);
+}
+
 /*
  * Determine which entity types are relevant and allocate the hashes to
- * track them.  Then walk the process table and count rss and swap
- * for each process'es address space.  Address space object such as
- * vnodes, amps and anons are tracked per entity, so that they are
- * not double counted in the results.
- *
+ * track them.  First get the zone rss using the data we already have. Then,
+ * if necessary, walk the process table and count rss and swap for each
+ * process'es address space.  Address space object such as vnodes, amps and
+ * anons are tracked per entity, so that they are not double counted in the
+ * results.
  */
 static void
 vmu_calculate()
@@ -1683,6 +1712,7 @@ vmu_calculate()
 	int i = 0;
 	int ret;
 	proc_t *p;
+	uint_t	zone_flags = 0;
 
 	vmu_clear_calc();
 
@@ -1690,8 +1720,33 @@ vmu_calculate()
 		vmu_data.vmu_system = vmu_alloc_entity(0, VMUSAGE_SYSTEM,
 		    ALL_ZONES);
 
+	zone_flags = vmu_data.vmu_calc_flags & VMUSAGE_ZONE_FLAGS;
+	if (zone_flags != 0) {
+		/*
+		 * Use the accurate zone RSS data we already keep track of.
+		 */
+		int i;
+
+		for (i = 0; i <= MAX_ZONEID; i++) {
+			if (zone_pcap_data[i].zpcap_pg_cnt > 0) {
+				vmu_get_zone_rss(i);
+			}
+		}
+	}
+
+	/* If only neeeded zone data, we're done. */
+	if ((vmu_data.vmu_calc_flags & ~VMUSAGE_ZONE_FLAGS) == 0) {
+		return;
+	}
+
+	DTRACE_PROBE(vmu__calculate__all);
+	vmu_data.vmu_calc_flags &= ~VMUSAGE_ZONE_FLAGS;
+
 	/*
 	 * Walk process table and calculate rss of each proc.
+	 *
+	 * Since we already obtained all zone rss above, the following loop
+	 * executes with the VMUSAGE_ZONE_FLAGS cleared.
 	 *
 	 * Pidlock and p_lock cannot be held while doing the rss calculation.
 	 * This is because:
@@ -1747,6 +1802,12 @@ again:
 	mutex_exit(&pidlock);
 
 	vmu_free_extra();
+
+	/*
+	 * Restore any caller-supplied zone flags we blocked during
+	 * the process-table walk.
+	 */
+	vmu_data.vmu_calc_flags |= zone_flags;
 }
 
 /*
@@ -1788,28 +1849,6 @@ vmu_cache_rele(vmu_cache_t *cache)
 		kmem_free(cache->vmc_results, sizeof (vmusage_t) *
 		    cache->vmc_nresults);
 		kmem_free(cache, sizeof (vmu_cache_t));
-	}
-}
-
-/*
- * When new data is calculated, update the phys_mem rctl usage value in the
- * zones.
- */
-static void
-vmu_update_zone_rctls(vmu_cache_t *cache)
-{
-	vmusage_t	*rp;
-	size_t		i = 0;
-	zone_t		*zp;
-
-	for (rp = cache->vmc_results; i < cache->vmc_nresults; rp++, i++) {
-		if (rp->vmu_type == VMUSAGE_ZONE &&
-		    rp->vmu_zoneid != ALL_ZONES) {
-			if ((zp = zone_find_by_id(rp->vmu_zoneid)) != NULL) {
-				zp->zone_phys_mem = rp->vmu_rss_all;
-				zone_rele(zp);
-			}
-		}
 	}
 }
 
@@ -2112,8 +2151,6 @@ start:
 
 		mutex_exit(&vmu_data.vmu_lock);
 
-		/* update zone's phys. mem. rctl usage */
-		vmu_update_zone_rctls(cache);
 		/* copy cache */
 		ret = vmu_copyout_results(cache, buf, nres, flags_orig,
 		    req_zone_id, cpflg);
@@ -2136,185 +2173,3 @@ start:
 	vmu_data.vmu_pending_waiters--;
 	goto start;
 }
-
-#if defined(__x86)
-/*
- * Attempt to invalidate all of the pages in the mapping for the given process.
- */
-static void
-map_inval(proc_t *p, struct seg *seg, caddr_t addr, size_t size)
-{
-	page_t		*pp;
-	size_t		psize;
-	u_offset_t	off;
-	caddr_t		eaddr;
-	struct vnode	*vp;
-	struct segvn_data *svd;
-	struct hat	*victim_hat;
-
-	ASSERT((addr + size) <= (seg->s_base + seg->s_size));
-
-	victim_hat = p->p_as->a_hat;
-	svd = (struct segvn_data *)seg->s_data;
-	vp = svd->vp;
-	psize = page_get_pagesize(seg->s_szc);
-
-	off = svd->offset + (uintptr_t)(addr - seg->s_base);
-
-	for (eaddr = addr + size; addr < eaddr; addr += psize, off += psize) {
-		pp = page_lookup_nowait(vp, off, SE_SHARED);
-
-		if (pp != NULL) {
-			/* following logic based on pvn_getdirty() */
-
-			if (pp->p_lckcnt != 0 || pp->p_cowcnt != 0) {
-				page_unlock(pp);
-				continue;
-			}
-
-			page_io_lock(pp);
-			hat_page_inval(pp, 0, victim_hat);
-			page_io_unlock(pp);
-
-			/*
-			 * For B_INVALCURONLY-style handling we let
-			 * page_release call VN_DISPOSE if no one else is using
-			 * the page.
-			 *
-			 * A hat_ismod() check would be useless because:
-			 * (1) we are not be holding SE_EXCL lock
-			 * (2) we've not unloaded _all_ translations
-			 *
-			 * Let page_release() do the heavy-lifting.
-			 */
-			(void) page_release(pp, 1);
-		}
-	}
-}
-
-/*
- * vm_map_inval()
- *
- * Invalidate as many pages as possible within the given mapping for the given
- * process. addr is expected to be the base address of the mapping and size is
- * the length of the mapping. In some cases a mapping will encompass an
- * entire segment, but at least for anon or stack mappings, these will be
- * regions within a single large segment. Thus, the invalidation is oriented
- * around a single mapping and not an entire segment.
- *
- * SPARC sfmmu hat does not support HAT_CURPROC_PGUNLOAD-style handling so
- * this code is only applicable to x86.
- */
-int
-vm_map_inval(pid_t pid, caddr_t addr, size_t size)
-{
-	int ret;
-	int error = 0;
-	proc_t *p;		/* target proc */
-	struct as *as;		/* target proc's address space */
-	struct seg *seg;	/* working segment */
-
-	if (curproc->p_zone != global_zone || crgetruid(curproc->p_cred) != 0)
-		return (set_errno(EPERM));
-
-	/* If not a valid mapping address, return an error */
-	if ((caddr_t)((uintptr_t)addr & (uintptr_t)PAGEMASK) != addr)
-		return (set_errno(EINVAL));
-
-again:
-	mutex_enter(&pidlock);
-	p = prfind(pid);
-	if (p == NULL) {
-		mutex_exit(&pidlock);
-		return (set_errno(ESRCH));
-	}
-
-	mutex_enter(&p->p_lock);
-	mutex_exit(&pidlock);
-
-	if (panicstr != NULL) {
-		mutex_exit(&p->p_lock);
-		return (0);
-	}
-
-	as = p->p_as;
-
-	/*
-	 * Try to set P_PR_LOCK - prevents process "changing shape"
-	 * - blocks fork
-	 * - blocks sigkill
-	 * - cannot be a system proc
-	 * - must be fully created proc
-	 */
-	ret = sprtrylock_proc(p);
-	if (ret == -1) {
-		/* Process in invalid state */
-		mutex_exit(&p->p_lock);
-		return (set_errno(ESRCH));
-	}
-
-	if (ret == 1) {
-		/*
-		 * P_PR_LOCK is already set. Wait and try again. This also
-		 * drops p_lock so p may no longer be valid since the proc may
-		 * have exited.
-		 */
-		sprwaitlock_proc(p);
-		goto again;
-	}
-
-	/* P_PR_LOCK is now set */
-	mutex_exit(&p->p_lock);
-
-	AS_LOCK_ENTER(as, RW_READER);
-	if ((seg = as_segat(as, addr)) == NULL) {
-		AS_LOCK_EXIT(as);
-		mutex_enter(&p->p_lock);
-		sprunlock(p);
-		return (set_errno(ENOMEM));
-	}
-
-	/*
-	 * The invalidation behavior only makes sense for vnode-backed segments.
-	 */
-	if (seg->s_ops != &segvn_ops) {
-		AS_LOCK_EXIT(as);
-		mutex_enter(&p->p_lock);
-		sprunlock(p);
-		return (0);
-	}
-
-	/*
-	 * If the mapping is out of bounds of the segement return an error.
-	 */
-	if ((addr + size) > (seg->s_base + seg->s_size)) {
-		AS_LOCK_EXIT(as);
-		mutex_enter(&p->p_lock);
-		sprunlock(p);
-		return (set_errno(EINVAL));
-	}
-
-	/*
-	 * Don't use MS_INVALCURPROC flag here since that would eventually
-	 * initiate hat invalidation based on curthread. Since we're doing this
-	 * on behalf of a different process, that would erroneously invalidate
-	 * our own process mappings.
-	 */
-	error = SEGOP_SYNC(seg, addr, size, 0, (uint_t)MS_ASYNC);
-	if (error == 0) {
-		/*
-		 * Since we didn't invalidate during the sync above, we now
-		 * try to invalidate all of the pages in the mapping.
-		 */
-		map_inval(p, seg, addr, size);
-	}
-	AS_LOCK_EXIT(as);
-
-	mutex_enter(&p->p_lock);
-	sprunlock(p);
-
-	if (error)
-		(void) set_errno(error);
-	return (error);
-}
-#endif

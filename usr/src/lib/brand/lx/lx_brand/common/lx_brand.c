@@ -73,6 +73,7 @@
 #include <sys/lx_syscall.h>
 #include <sys/lx_thread.h>
 #include <lx_auxv.h>
+#include <sys/lx_userhz.h>
 
 /*
  * There is a block comment in "uts/common/brand/lx/os/lx_brand.c" that
@@ -134,6 +135,8 @@ int lx_debug_enabled = 0;	/* debugging output enabled if non-zero */
 pid_t zoneinit_pid;		/* zone init PID */
 
 thread_key_t lx_tsd_key;
+
+uint_t lx_hz_scale;		/* USER_HZ scaling factor */
 
 int
 uucopy_unsafe(const void *src, void *dst, size_t n)
@@ -626,6 +629,8 @@ lx_init(int argc, char *argv[], char *envp[])
 	bzero(&reg, sizeof (reg));
 	stack_size = 2 * sysconf(_SC_PAGESIZE);
 
+	lx_hz_scale = sysconf(_SC_CLK_TCK) / LX_USERHZ;
+
 	/*
 	 * We need to shutdown all libc stdio.  libc stdio normally goes to
 	 * file descriptors, but since we're actually part of a linux
@@ -1019,7 +1024,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/*   6: lstat */
 	NULL,				/*   7: poll */
 	NULL,				/*   8: lseek */
-	lx_mmap,			/*   9: mmap */
+	NULL,				/*   9: mmap */
 	NULL,				/*  10: mprotect */
 	NULL,				/*  11: munmap */
 	NULL,				/*  12: brk */
@@ -1035,7 +1040,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/*  22: pipe */
 	NULL,				/*  23: select */
 	NULL,				/*  24: sched_yield */
-	lx_remap,			/*  25: mremap */
+	NULL,				/*  25: mremap */
 	NULL,				/*  26: msync */
 	NULL,				/*  27: mincore */
 	NULL,				/*  28: madvise */
@@ -1110,7 +1115,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/*  97: getrlimit */
 	NULL,				/*  98: getrusage */
 	NULL,				/*  99: sysinfo */
-	lx_times,			/* 100: times */
+	NULL,				/* 100: times */
 	NULL,				/* 101: ptrace */
 	NULL,				/* 102: getuid */
 	NULL,				/* 103: syslog */
@@ -1384,7 +1389,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	lx_rmdir,			/*  40: rmdir */
 	NULL,				/*  41: dup */
 	NULL,				/*  42: pipe */
-	lx_times,			/*  43: times */
+	NULL,				/*  43: times */
 	NULL,				/*  44: prof */
 	NULL,				/*  45: brk */
 	NULL,				/*  46: setgid16 */
@@ -1431,7 +1436,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/*  87: swapon */
 	NULL,				/*  88: reboot */
 	lx_readdir,			/*  89: readdir */
-	lx_mmap,			/*  90: mmap */
+	NULL,				/*  90: mmap */
 	NULL,				/*  91: munmap */
 	lx_truncate,			/*  92: truncate */
 	lx_ftruncate,			/*  93: ftruncate */
@@ -1504,7 +1509,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 160: sched_get_priority_min */
 	NULL,				/* 161: sched_rr_get_interval */
 	NULL,				/* 162: nanosleep */
-	lx_remap,			/* 163: mremap */
+	NULL,				/* 163: mremap */
 	NULL,				/* 164: setresuid16 */
 	NULL,				/* 165: getresuid16 */
 	NULL,				/* 166: vm86 */
@@ -1533,7 +1538,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 189: putpmsg */
 	lx_vfork,			/* 190: vfork */
 	NULL,				/* 191: getrlimit */
-	lx_mmap2,			/* 192: mmap2 */
+	NULL,				/* 192: mmap2 */
 	lx_truncate64,			/* 193: truncate64 */
 	lx_ftruncate64,			/* 194: ftruncate64 */
 	NULL,				/* 195: stat64 */

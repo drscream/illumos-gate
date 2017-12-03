@@ -89,6 +89,9 @@ typedef enum lx_if_action {
 #define	LX_IPV6_ADDR_SITELOCAL	0x0040U
 #define	LX_IPV6_ADDR_COMPATv4	0x0080U
 
+/* Maximum length of a thread name, including the NUL terminator */
+#define	LX_PR_SET_NAME_NAMELEN	16
+
 extern void lx_ifname_convert(char *, lx_if_action_t);
 extern void lx_ifflags_convert(uint64_t *, lx_if_action_t);
 extern unsigned int lx_ipv6_scope_convert(const in6_addr_t *);
@@ -120,6 +123,9 @@ extern void lx_vsyscall_enter(proc_t *, klwp_t *, int);
 extern void lx_check_strict_failure(lx_lwp_data_t *);
 
 extern boolean_t lx_is_eventfd(file_t *);
+
+extern int lx_read_common(file_t *, uio_t *, size_t *, boolean_t);
+extern int lx_write_common(file_t *, uio_t *, size_t *, boolean_t);
 
 #endif
 

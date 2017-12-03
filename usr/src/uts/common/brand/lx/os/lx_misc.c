@@ -40,6 +40,7 @@
 #include <sys/lx_siginfo.h>
 #include <sys/lx_futex.h>
 #include <lx_errno.h>
+#include <sys/lx_userhz.h>
 #include <sys/cmn_err.h>
 #include <sys/siginfo.h>
 #include <sys/contract/process_impl.h>
@@ -182,6 +183,26 @@ lx_cleanlwp(klwp_t *lwp, proc_t *p)
 	if (rb_list != NULL) {
 		lx_futex_robust_exit((uintptr_t)rb_list, lwpd->br_pid);
 	}
+
+	/*
+	 * We need to run our context exit operation (lx_save) here to ensure
+	 * we don't leave any garbage around. This is necessary to handle the
+	 * following calling sequence:
+	 *    exit -> proc_exit -> lx_freelwp -> removectx
+	 * That is, when our branded process exits, proc_exit will call our
+	 * lx_freelwp brand hook which does call this function (lx_cleanlwp),
+	 * but lx_freelwp also removes our context exit operation. The context
+	 * exit functions are run by exitctx, which is called by either
+	 * lwp_exit or thread_exit. The thread_exit function is called at the
+	 * end of proc_exit when we'll swtch() to another thread, but by then
+	 * our context exit function has been removed.
+	 *
+	 * It's ok if this function happens to be called more than once (for
+	 * example, if we exec a native binary).
+	 */
+	kpreempt_disable();
+	lx_save(lwp);
+	kpreempt_enable();
 }
 
 void
@@ -713,6 +734,10 @@ lx_winfo(proc_t *pp, k_siginfo_t *ip, struct lx_proc_data *dat)
 	ip->si_ctid = PRCTID(pp);
 	ip->si_zoneid = pp->p_zone->zone_id;
 	ip->si_status = pp->p_wdata;
+	/*
+	 * These siginfo values are converted to USER_HZ in the user-land
+	 * brand signal code.
+	 */
 	ip->si_stime = pp->p_stime;
 	ip->si_utime = pp->p_utime;
 }
@@ -961,8 +986,8 @@ stol_ksiginfo_copyout(k_siginfo_t *sip, void *ulxsip)
 			lsi.lsi_status = lx_stol_status(sip->si_status,
 			    SIGKILL);
 		}
-		lsi.lsi_utime = sip->si_utime;
-		lsi.lsi_stime = sip->si_stime;
+		lsi.lsi_utime = HZ_TO_LX_USERHZ(sip->si_utime);
+		lsi.lsi_stime = HZ_TO_LX_USERHZ(sip->si_stime);
 		break;
 
 	case LX_SIGILL:
@@ -1009,8 +1034,8 @@ stol_ksiginfo32_copyout(k_siginfo_t *sip, void *ulxsip)
 			lsi.lsi_status = lx_stol_status(sip->si_status,
 			    SIGKILL);
 		}
-		lsi.lsi_utime = sip->si_utime;
-		lsi.lsi_stime = sip->si_stime;
+		lsi.lsi_utime = HZ_TO_LX_USERHZ(sip->si_utime);
+		lsi.lsi_stime = HZ_TO_LX_USERHZ(sip->si_stime);
 		break;
 
 	case LX_SIGILL:
