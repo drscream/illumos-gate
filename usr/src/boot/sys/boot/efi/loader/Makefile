@@ -26,10 +26,10 @@ PROG=		loader.sym
 MACHINE=	$(MACH64)
 
 # architecture-specific loader code
-SRCS=	autoload.c bootinfo.c conf.c copy.c devicename.c main.c self_reloc.c \
-	smbios.c acpi.c vers.c memmap.c multiboot2.c
-OBJS= autoload.o bootinfo.o conf.o copy.o devicename.o main.o self_reloc.o \
-	smbios.o acpi.o vers.o memmap.o multiboot2.o
+SRCS=	autoload.c bootinfo.c conf.c copy.c devicename.c efi_main.c main.c \
+	self_reloc.c smbios.c acpi.c vers.c memmap.c multiboot2.c
+OBJS= autoload.o bootinfo.o conf.o copy.o devicename.o efi_main.o main.o \
+	self_reloc.o smbios.o acpi.o vers.o memmap.o multiboot2.o
 
 ASFLAGS=-m64 -fPIC
 CFLAGS=	-O2
@@ -62,7 +62,7 @@ CPPFLAGS += -DSMBIOS_LITTLE_ENDIAN_UUID
 LIBSTAND=	../../libstand/${MACHINE}/libstand.a
 
 BOOT_FORTH=	yes
-CPPFLAGS +=	-DBOOT_FORTH -DSTAND
+CPPFLAGS +=	-DBOOT_FORTH -D_STANDALONE
 CPPFLAGS +=	-I$(SRC)/common/ficl
 CPPFLAGS +=	-I../../ficl
 LIBFICL=	../../ficl/${MACHINE}/libficl.a
