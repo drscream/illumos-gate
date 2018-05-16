@@ -24,6 +24,7 @@
 #
 # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
 # Copyright (c) 2013 Andrew Stormont.  All rights reserved.
+# Copyright 2017 Joyent, Inc.
 #
 #
 #	This makefile contains the common definitions for the i86pc unix
@@ -102,8 +103,8 @@ include $(UTSBASE)/Makefile.uts
 #
 #	Define supported builds
 #
-DEF_BUILDS		= $(DEF_BUILDS64) $(DEF_BUILDS32)
-ALL_BUILDS		= $(ALL_BUILDS64) $(ALL_BUILDS32)
+DEF_BUILDS		= $(DEF_BUILDS64)
+ALL_BUILDS		= $(ALL_BUILDS64)
 
 #
 #	x86 or amd64 inline templates
@@ -264,6 +265,9 @@ DRV_KMODS	+= amd_iommu
 DRV_KMODS	+= dr
 DRV_KMODS	+= ioat
 DRV_KMODS	+= fipe
+DRV_KMODS	+= vmm
+DRV_KMODS	+= viona
+DRV_KMODS	+= ppt
 
 DRV_KMODS	+= cpudrv
 

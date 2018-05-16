@@ -22,7 +22,7 @@
 #
 # Copyright (c) 1989, 2010, Oracle and/or its affiliates. All rights reserved.
 # Copyright (c) 2012 by Delphix. All rights reserved.
-# Copyright 2015, Joyent, Inc.
+# Copyright 2017 Joyent, Inc.
 # Copyright (c) 2013 Gary Mills
 # Copyright 2014 Garrett D'Amore <garrett@damore.org>
 # Copyright (c) 2015 Gary Mills
@@ -166,6 +166,7 @@ SUBDIRS +=				\
 	libmapid	\
 	libmapmalloc	\
 	libmd5		\
+	libmlrpc	\
 	libmtmalloc	\
 	libmvec		\
 	libndmp		\
@@ -182,6 +183,7 @@ SUBDIRS +=				\
 	libpkg		\
 	libpool		\
 	libpp		\
+	libppt		\
 	libproc		\
 	libproject	\
 	libpthread	\
@@ -278,7 +280,8 @@ SUBDIRS +=				\
 
 i386_SUBDIRS=		\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_SUBDIRS=		\
 	efcode		\
@@ -431,6 +434,7 @@ HDRSUBDIRS=				\
 	libmail		\
 	libmapid	\
 	libmd		\
+	libmlrpc	\
 	libmtmalloc	\
 	libndmp		\
 	libnsctl	\
@@ -445,6 +449,7 @@ HDRSUBDIRS=				\
 	libpicltree	\
 	libpool		\
 	libpp		\
+	libppt		\
 	libproc		\
 	libraidcfg	\
 	librcm		\
@@ -503,11 +508,13 @@ HDRSUBDIRS=				\
 	smbsrv		\
 	smhba		\
 	udapl		\
+	varpd		\
 	$($(MACH)_HDRSUBDIRS)
 
 i386_HDRSUBDIRS=	\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_HDRSUBDIRS=	\
 	libds		\
@@ -584,7 +591,8 @@ auditd_plugins: libbsm libsecdb libgss libmtmalloc
 brand:		libzonecfg libmapmalloc libipadm libcmdutils libproc librpcsvc
 cfgadm_plugins:	libdevice libdevinfo libhotplug librcm hbaapi libkstat libscf
 fm:		libexacct libipmi libzfs scsi libdevinfo libdevid libcfgadm \
-		libcontract libsysevent ../cmd/sgs/libelf libdladm libsff
+		libcontract libsysevent ../cmd/sgs/libelf libdladm libsff \
+		libpcidb
 $(SPARC_BLD)fm:	libpri
 gss_mechs/mech_dh: libgss
 gss_mechs/mech_dummy: libgss
@@ -640,6 +648,7 @@ libkmf:		libcryptoutil pkcs11
 libkvm:		../cmd/sgs/libelf
 libldap5:	libsasl
 libmapid:	libresolv2 libscf
+libmlrpc:	libsmbfs libuuid
 libndmp:	libscf
 libnisdb:	libldap5
 libnwam:	libscf libbsm libdladm libipadm
@@ -648,6 +657,7 @@ libpctx:	libproc
 libpkg:		libscf libadm
 libpool:	libscf libexacct
 libpp:		libast
+libppt:		libpcidb libdevinfo libcmdutils
 libproc:	../cmd/sgs/librtld_db ../cmd/sgs/libelf libctf
 $(INTEL_BLD)libproc: libsaveargs
 libproject:	libpool libproc libsecdb
@@ -670,8 +680,8 @@ libsmbfs:	libkrb5 libsec libidmap pkcs11
 libsmbios:	libdevinfo
 libsrpt:	libstmf
 libstmf:	libscf
-libstmfproxy: 	libstmf libpthread
-libsum: 	libast
+libstmfproxy:	libstmf libpthread
+libsum:		libast
 libsun_ima:	libdevinfo libsysevent
 libsysevent:	libsecdb
 libtecla:	libcurses
@@ -687,7 +697,7 @@ libvrrpadm:	libdladm libscf
 libvscan:	libscf libsecdb
 libzdoor:	libc libzonecfg libcontract
 libzfs:		libdevid libgen libuutil libadm libavl libefi libidmap \
-		libumem libtsol libzfs_core libcmdutils
+		libumem libtsol libzfs_core
 libzfs_jni:	libdiskmgt libzfs
 libzonecfg:	libuuid libsysevent libsec libbrand libpool libscf libproc \
 		libuutil libbsm libsecdb
@@ -703,7 +713,7 @@ passwdutil:	libsldap
 pkcs11:		libcryptoutil libgen libuuid
 policykit:	dbusdeps
 print:		libldap5 libmd5 libsendfile
-pylibbe: 	libbe libzfs
+pylibbe:	libbe libzfs
 pysolaris:	libsec libidmap
 pyzfs:		libzfs
 raidcfg_plugins: libraidcfg librcm libcfgadm libpicl libpicltree
@@ -712,7 +722,7 @@ sasl_plugins:	pkcs11 libgss libsasl
 scsi:		libfru libumem libdevid libdevinfo
 smbsrv:		libxnet libpthread librt libshare libidmap pkcs11 libsqlite \
 		libcryptoutil libreparse libcmdutils libresolv2 libsmbfs \
-		libuuid libfakekernel libads libgss libldap5 krb5
+		libuuid libfakekernel libads libgss libldap5 krb5 libmlrpc
 storage:	libdevice libdevinfo libdevid
 sun_fc:		libdevinfo libsysevent
 sun_sas:	libdevinfo libsysevent libkstat libdevid

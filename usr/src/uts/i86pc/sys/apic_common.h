@@ -22,7 +22,7 @@
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  */
 /*
- * Copyright (c) 2013, Joyent, Inc.  All rights reserved.
+ * Copyright 2018 Joyent, Inc.
  */
 
 #ifndef _SYS_APIC_COMMON_H
@@ -115,6 +115,8 @@ extern int	apic_panic_on_apic_error;
 
 extern int	apic_verbose;
 
+extern int	apic_pir_vect;
+
 #ifdef DEBUG
 extern int	apic_debug;
 extern int	apic_restrict_vector;
@@ -182,10 +184,12 @@ extern void	apic_shutdown(int cmd, int fcn);
 extern void	apic_preshutdown(int cmd, int fcn);
 extern processorid_t	apic_get_next_processorid(processorid_t cpun);
 extern uint_t	apic_calibrate(volatile uint32_t *, uint16_t *);
+extern int	apic_get_pir_ipivect(void);
+extern void	apic_send_pir_ipi(processorid_t);
 
 extern int apic_error_intr();
 extern void apic_cpcovf_mask_clear(void);
-extern int cmci_cpu_setup(cpu_setup_t what, int cpuid, void *arg);
+extern void apic_cmci_setup(processorid_t, boolean_t);
 extern void apic_intrmap_init(int apic_mode);
 extern processorid_t apic_find_cpu(int flag);
 extern processorid_t apic_get_next_bind_cpu(void);

@@ -1,4 +1,4 @@
-/*-
+/*
  * Copyright (c) 2008-2010 Rui Paulo
  * Copyright (c) 2006 Marcel Moolenaar
  * All rights reserved.
@@ -46,9 +46,8 @@
 #include <bootstrap.h>
 #include <smbios.h>
 
-#ifdef EFI_ZFS_BOOT
 #include <libzfs.h>
-#endif
+#include <efizfs.h>
 
 #include "loader_efi.h"
 
@@ -64,10 +63,14 @@ EFI_GUID inputid = SIMPLE_TEXT_INPUT_PROTOCOL;
 
 extern void acpi_detect(void);
 extern void efi_getsmap(void);
-#ifdef EFI_ZFS_BOOT
-static void efi_zfs_probe(void);
-static uint64_t pool_guid;
-#endif
+
+static EFI_LOADED_IMAGE *img;
+
+bool
+efi_zfs_is_preferred(EFI_HANDLE *h)
+{
+	return (h == img->DeviceHandle);
+}
 
 static int
 has_keyboard(void)
@@ -77,7 +80,7 @@ has_keyboard(void)
 	EFI_HANDLE *hin, *hin_end, *walker;
 	UINTN sz;
 	int retval = 0;
-	
+
 	/*
 	 * Find all the handles that support the SIMPLE_TEXT_INPUT_PROTOCOL and
 	 * do the typical dance to get the right sized buffer.
@@ -134,7 +137,7 @@ has_keyboard(void)
 			} else if (DevicePathType(path) == MESSAGING_DEVICE_PATH &&
 			    DevicePathSubType(path) == MSG_USB_CLASS_DP) {
 				USB_CLASS_DEVICE_PATH *usb;
-			       
+       
 				usb = (USB_CLASS_DEVICE_PATH *)(void *)path;
 				if (usb->DeviceClass == 3 && /* HID */
 				    usb->DeviceSubClass == 1 && /* Boot devices */
@@ -160,7 +163,6 @@ set_devdesc_currdev(struct devsw *dev, int unit)
 	currdev.d_dev = dev;
 	currdev.d_type = currdev.d_dev->dv_type;
 	currdev.d_unit = unit;
-	currdev.d_opendata = NULL;
 	devname = efi_fmtdev(&currdev);
 
 	env_setenv("currdev", EV_VOLATILE, devname, efi_setcurrdev,
@@ -187,7 +189,6 @@ find_currdev(EFI_LOADED_IMAGE *img)
 		currdev.d_dev = &zfs_dev;
 		currdev.d_unit = 0;
 		currdev.d_type = currdev.d_dev->dv_type;
-		currdev.d_opendata = NULL;
 		currdev.pool_guid = pool_guid;
 		currdev.root_guid = 0;
 		devname = efi_fmtdev(&currdev);
@@ -207,7 +208,6 @@ find_currdev(EFI_LOADED_IMAGE *img)
 		currdev.d_dev = &efipart_hddev;
 		currdev.d_type = currdev.d_dev->dv_type;
 		currdev.d_unit = dp->pd_unit;
-		currdev.d_opendata = NULL;
 		currdev.d_slice = -1;
 		currdev.d_partition = -1;
 
@@ -294,7 +294,6 @@ EFI_STATUS
 main(int argc, CHAR16 *argv[])
 {
 	char var[128];
-	EFI_LOADED_IMAGE *img;
 	EFI_GUID *guid;
 	int i, j, vargood, howto;
 	void *ptr;
@@ -308,10 +307,11 @@ main(int argc, CHAR16 *argv[])
 	archsw.arch_readin = efi_readin;
 	archsw.arch_loadaddr = efi_loadaddr;
 	archsw.arch_free_loadaddr = efi_free_loadaddr;
-#ifdef EFI_ZFS_BOOT
 	/* Note this needs to be set before ZFS init. */
 	archsw.arch_zfs_probe = efi_zfs_probe;
-#endif
+
+	/* Get our loaded image protocol interface structure. */
+	BS->HandleProtocol(IH, &imgid, (VOID**)&img);
 
 	/* Init the time source */
 	efi_time_init();
@@ -432,14 +432,15 @@ main(int argc, CHAR16 *argv[])
 	}
 
 	/*
-	 * March through the device switch probing for things.
+	 * Scan the BLOCK IO MEDIA handles then
+	 * march through the device switch probing for things.
 	 */
-	for (i = 0; devsw[i] != NULL; i++)
-		if (devsw[i]->dv_init != NULL)
-			(devsw[i]->dv_init)();
-
-	/* Get our loaded image protocol interface structure. */
-	BS->HandleProtocol(IH, &imgid, (VOID**)&img);
+	if ((i = efipart_inithandles()) == 0) {
+		for (i = 0; devsw[i] != NULL; i++)
+			if (devsw[i]->dv_init != NULL)
+				(devsw[i]->dv_init)();
+	} else
+		printf("efipart_inithandles failed %d, expect failures", i);
 
 	printf("Command line arguments:");
 	for (i = 0; i < argc; i++) {
@@ -884,9 +885,41 @@ command_chain(int argc, char *argv[])
 		*(--argv) = 0;
 	}
 
-	if (efi_getdev((void **)&dev, name, (const char **)&path) == 0)
-		loaded_image->DeviceHandle =
-		    efi_find_handle(dev->d_dev, dev->d_unit);
+	if (efi_getdev((void **)&dev, name, (const char **)&path) == 0) {
+		struct zfs_devdesc *z_dev;
+		struct disk_devdesc *d_dev;
+		pdinfo_t *hd, *pd;
+
+		switch (dev->d_type) {
+		case DEVT_ZFS:
+			z_dev = (struct zfs_devdesc *)dev;
+			loaded_image->DeviceHandle =
+			    efizfs_get_handle_by_guid(z_dev->pool_guid);
+			break;
+		case DEVT_NET:
+			loaded_image->DeviceHandle =
+			    efi_find_handle(dev->d_dev, dev->d_unit);
+			break;
+		default:
+			hd = efiblk_get_pdinfo(dev);
+			if (STAILQ_EMPTY(&hd->pd_part)) {
+				loaded_image->DeviceHandle = hd->pd_handle;
+				break;
+			}
+			d_dev = (struct disk_devdesc *)dev;
+			STAILQ_FOREACH(pd, &hd->pd_part, pd_link) {
+				/*
+				 * d_partition should be 255
+				 */
+				if (pd->pd_unit == d_dev->d_slice) {
+					loaded_image->DeviceHandle =
+					    pd->pd_handle;
+					break;
+				}
+			}
+			break;
+		}
+	}
 
 	dev_cleanup();
 	status = BS->StartImage(loaderhandle, NULL, NULL);
@@ -902,46 +935,3 @@ command_chain(int argc, char *argv[])
 }
 
 COMMAND_SET(chain, "chain", "chain load file", command_chain);
-
-#ifdef EFI_ZFS_BOOT
-static void
-efi_zfs_probe(void)
-{
-	pdinfo_list_t *hdi;
-	pdinfo_t *hd, *pd = NULL;
-	EFI_GUID imgid = LOADED_IMAGE_PROTOCOL;
-	EFI_LOADED_IMAGE *img;
-	char devname[SPECNAMELEN + 1];
-
-	BS->HandleProtocol(IH, &imgid, (VOID**)&img);
-	hdi = efiblk_get_pdinfo_list(&efipart_hddev);
-
-	/*
-	 * Find the handle for the boot device. The boot1 did find the
-	 * device with loader binary, now we need to search for the
-	 * same device and if it is part of the zfs pool, we record the
-	 * pool GUID for currdev setup.
-	 */
-	STAILQ_FOREACH(hd, hdi, pd_link) {
-		STAILQ_FOREACH(pd, &hd->pd_part, pd_link) {
-
-			snprintf(devname, sizeof(devname), "%s%dp%d:",
-			    efipart_hddev.dv_name, hd->pd_unit, pd->pd_unit);
-			if (pd->pd_handle == img->DeviceHandle)
-				(void) zfs_probe_dev(devname, &pool_guid);
-			else
-				(void) zfs_probe_dev(devname, NULL);
-		}
-	}
-}
-
-uint64_t
-ldi_get_size(void *priv)
-{
-	int fd = (uintptr_t) priv;
-	uint64_t size;
-
-	ioctl(fd, DIOCGMEDIASIZE, &size);
-	return (size);
-}
-#endif

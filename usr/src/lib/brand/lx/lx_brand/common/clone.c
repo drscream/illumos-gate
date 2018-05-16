@@ -22,7 +22,7 @@
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
- * Copyright 2017 Joyent, Inc.
+ * Copyright 2018 Joyent, Inc.
  */
 
 #include <assert.h>
@@ -557,6 +557,11 @@ lx_clone(uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5)
 			}
 
 			/*
+			 * Re-enable signal delivery in the child process.
+			 */
+			lx_unblock_all_signals();
+
+			/*
 			 * Stop for ptrace if required.
 			 */
 			lx_ptrace_stop_if_option(ptrace_event, B_TRUE, 0, NULL);
@@ -631,7 +636,7 @@ lx_clone(uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5)
 	 * thread:
 	 */
 	if ((cs = malloc(sizeof (*cs))) == NULL) {
-		lx_debug("could not allocate clone_state: %s", strerror(errno));
+		lx_debug("could not allocate clone_state: %d", errno);
 		return (-ENOMEM);
 	}
 	cs->c_flags = flags;
@@ -665,7 +670,7 @@ lx_clone(uintptr_t p1, uintptr_t p2, uintptr_t p3, uintptr_t p4, uintptr_t p5)
 	 */
 	VERIFY0(sigfillset(&sigmask));
 	if (sigprocmask(SIG_BLOCK, &sigmask, &osigmask) < 0) {
-		lx_debug("lx_clone sigprocmask() failed: %s", strerror(errno));
+		lx_debug("lx_clone sigprocmask() failed: %d", errno);
 		free(cs->c_lx_tsd);
 		free(cs);
 		return (-errno);

@@ -23,7 +23,7 @@
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  */
 /*
- * Copyright (c) 2017, Joyent, Inc.  All rights reserved.
+ * Copyright 2018 Joyent, Inc.
  * Copyright (c) 2016 by Delphix. All rights reserved.
  */
 
@@ -122,13 +122,11 @@ int apic_enable_cpcovf_intr = 1;
 
 /* vector at which CMCI interrupts come in */
 int apic_cmci_vect;
-extern int cmi_enable_cmci;
 extern void cmi_cmci_trap(void);
 
-kmutex_t cmci_cpu_setup_lock;	/* protects cmci_cpu_setup_registered */
-int cmci_cpu_setup_registered;
-
 lock_t apic_mode_switch_lock;
+
+int apic_pir_vect;
 
 /*
  * Patchable global variables.
@@ -380,30 +378,20 @@ apic_cmci_disable(xc_arg_t arg1, xc_arg_t arg2, xc_arg_t arg3)
 	return (0);
 }
 
-/*ARGSUSED*/
-int
-cmci_cpu_setup(cpu_setup_t what, int cpuid, void *arg)
+void
+apic_cmci_setup(processorid_t cpuid, boolean_t enable)
 {
 	cpuset_t	cpu_set;
 
 	CPUSET_ONLY(cpu_set, cpuid);
 
-	switch (what) {
-		case CPU_ON:
-			xc_call(NULL, NULL, NULL, CPUSET2BV(cpu_set),
-			    (xc_func_t)apic_cmci_enable);
-			break;
-
-		case CPU_OFF:
-			xc_call(NULL, NULL, NULL, CPUSET2BV(cpu_set),
-			    (xc_func_t)apic_cmci_disable);
-			break;
-
-		default:
-			break;
+	if (enable) {
+		xc_call(NULL, NULL, NULL, CPUSET2BV(cpu_set),
+		    (xc_func_t)apic_cmci_enable);
+	} else {
+		xc_call(NULL, NULL, NULL, CPUSET2BV(cpu_set),
+		    (xc_func_t)apic_cmci_disable);
 	}
-
-	return (0);
 }
 
 static void
@@ -629,6 +617,31 @@ apic_send_ipi(int cpun, int ipl)
 	intr_restore(flag);
 }
 
+void
+apic_send_pir_ipi(processorid_t cpun)
+{
+	const int vector = apic_pir_vect;
+	ulong_t flag;
+
+	ASSERT((vector >= APIC_BASE_VECT) && (vector <= APIC_SPUR_INTR));
+
+	flag = intr_clear();
+
+	/* Self-IPI for inducing PIR makes no sense. */
+	if ((cpun != psm_get_cpu_id())) {
+		APIC_AV_PENDING_SET();
+		apic_reg_ops->apic_write_int_cmd(apic_cpus[cpun].aci_local_id,
+		    vector);
+	}
+
+	intr_restore(flag);
+}
+
+int
+apic_get_pir_ipivect(void)
+{
+	return (apic_pir_vect);
+}
 
 /*ARGSUSED*/
 void
