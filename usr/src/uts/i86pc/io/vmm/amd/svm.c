@@ -1377,6 +1377,7 @@ svm_vmexit(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 			 */
 			reflect = 0;
 			VCPU_CTR0(svm_sc->vm, vcpu, "Vectoring to MCE handler");
+			/* XXXJOY: we will need equivalent of vmx_call_trap */
 			__asm __volatile("int $18");
 			break;
 		case IDT_PF:
@@ -2036,6 +2037,12 @@ svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
 		if (vcpu_should_yield(vm, vcpu)) {
 			enable_gintr();
 			vm_exit_astpending(vm, vcpu, state->rip);
+			break;
+		}
+
+		if (vcpu_debugged(vm, vcpu)) {
+			enable_gintr();
+			vm_exit_debug(vm, vcpu, state->rip);
 			break;
 		}
 

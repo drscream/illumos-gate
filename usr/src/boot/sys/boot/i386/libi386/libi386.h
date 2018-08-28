@@ -30,24 +30,16 @@
 
 /*
  * i386 fully-qualified device descriptor.
- * Note, this must match struct zfs_devdesc for zfs support.
  */
-/* Note: Must match the 'struct devdesc' in stand.h */
 struct i386_devdesc {
-    struct devsw	*d_dev;
-    int			d_type;
-    int			d_unit;
-    void		*d_opendata;
-    union 
-    {
-	struct 
-	{
+    struct devdesc	dd;	/* Must be first. */
+    union {
+	struct {
 	    int		slice;
 	    int		partition;
 	    off_t	offset;
 	} biosdisk;
-	struct
-	{
+	struct {
 	    uint64_t	pool_guid;
 	    uint64_t	root_guid;
 	} zfs;

@@ -269,7 +269,7 @@ apix_probe()
 	 *
 	 * Please remove when/if the issue is resolved.
 	 */
-	if (get_hwenv() == HW_XEN_HVM)
+	if (get_hwenv() & HW_XEN_HVM)
 		return (PSM_FAILURE);
 
 	/* check for hw features if specified  */
@@ -356,7 +356,7 @@ apix_get_intr_handler(int cpu, short vec)
 	apix_vector_t *apix_vector;
 
 	ASSERT(cpu < apic_nproc && vec < APIX_NVECTOR);
-	if (cpu >= apic_nproc)
+	if (cpu >= apic_nproc || vec >= APIX_NVECTOR)
 		return (NULL);
 
 	apix_vector = apixs[cpu]->x_vectbl[vec];

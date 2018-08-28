@@ -406,7 +406,7 @@ ppt_bar_crawl(struct pptdev *ppt)
 	}
 
 	VERIFY3S(rlen, >, 0);
-	rcount = (rlen * sizeof (int)) / sizeof (pci_regspec_t);
+	rcount = rlen / sizeof (pci_regspec_t);
 	for (i = 0; i < rcount; i++) {
 		pci_regspec_t *reg = &regs[i];
 		struct pptbar *pbar;
@@ -817,6 +817,10 @@ ppt_flr(dev_info_t *dip, boolean_t force)
 	return (B_TRUE);
 
 fail:
+	/*
+	 * TODO: If the FLR fails for some reason, we should attempt a reset
+	 * using the PCI power management facilities (if possible).
+	 */
 	pci_config_teardown(&hdl);
 	return (B_FALSE);
 }

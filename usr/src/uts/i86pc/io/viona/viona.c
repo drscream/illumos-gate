@@ -102,7 +102,7 @@
  *        |---* ring worker thread begins execution	|
  *        |						|
  *        +-------------------------------------------->+
- *        |	      | 				^
+ *        |	      |					^
  *        |	      |
  *        |	      *	If ring shutdown is requested (by ioctl or impending
  *        |		bhyve process death) while the worker thread is
@@ -220,6 +220,7 @@
 #include <sys/strsubr.h>
 #include <sys/strsun.h>
 #include <vm/seg_kmem.h>
+#include <sys/ht.h>
 
 #include <sys/pattr.h>
 #include <sys/dls.h>
@@ -1750,7 +1751,7 @@ viona_copy_mblk(const mblk_t *mp, size_t seek, caddr_t buf, size_t len,
 
 	/* Seek past already-consumed data */
 	while (seek > 0 && mp != NULL) {
-		size_t chunk = MBLKL(mp);
+		const size_t chunk = MBLKL(mp);
 
 		if (chunk > seek) {
 			off = seek;
@@ -1769,17 +1770,31 @@ viona_copy_mblk(const mblk_t *mp, size_t seek, caddr_t buf, size_t len,
 		buf += to_copy;
 		len -= to_copy;
 
+		/*
+		 * If all the remaining data in the mblk_t was copied, move on
+		 * to the next one in the chain.  Any seek offset applied to
+		 * the first mblk copy is zeroed out for subsequent operations.
+		 */
+		if (chunk == to_copy) {
+			mp = mp->b_cont;
+			off = 0;
+		}
+#ifdef DEBUG
+		else {
+			/*
+			 * The only valid reason for the copy to consume less
+			 * than the entire contents of the mblk_t is because
+			 * the output buffer has been filled.
+			 */
+			ASSERT0(len);
+		}
+#endif
+
 		/* Go no further if the buffer has been filled */
 		if (len == 0) {
 			break;
 		}
 
-		/*
-		 * Any offset into the initially chosen mblk_t buffer is
-		 * consumed on the first copy operation.
-		 */
-		off = 0;
-		mp = mp->b_cont;
 	}
 	*end = (mp == NULL);
 	return (copied);
@@ -2400,7 +2415,13 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 		viona_tx_done(ring, len, cookie);
 	}
 
+	/*
+	 * We're potentially going deep into the networking layer; make sure the
+	 * guest can't run concurrently.
+	 */
+	ht_begin_unsafe();
 	mac_tx(link_mch, mp_head, 0, MAC_DROP_ON_NO_DESC, NULL);
+	ht_end_unsafe();
 	return;
 
 drop_fail:

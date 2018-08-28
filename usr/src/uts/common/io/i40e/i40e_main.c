@@ -11,7 +11,7 @@
 
 /*
  * Copyright 2015 OmniTI Computer Consulting, Inc. All rights reserved.
- * Copyright (c) 2017, Joyent, Inc.
+ * Copyright (c) 2018, Joyent, Inc.
  * Copyright 2017 Tegile Systems, Inc.  All rights reserved.
  */
 
@@ -137,7 +137,7 @@
  * resources between everything, we'll end up just dividing the resources
  * evenly between all of the functions. Longer term, if we don't have to declare
  * to the GLDv3 that these resources are shared, then we'll maintain a pool and
- * hae each PF allocate from the pool in the device, thus if only two of four
+ * have each PF allocate from the pool in the device, thus if only two of four
  * ports are being used, for example, then all of the resources can still be
  * used.
  *
@@ -169,7 +169,7 @@
  * To receieve broadcast traffic, we enable it through the admin queue, rather
  * than use one of our filters for it. For multicast traffic, we reserve a
  * certain number of the hash filters and assign them to a given PF. When we
- * exceed those, we then switch to using promicuous mode for multicast traffic.
+ * exceed those, we then switch to using promiscuous mode for multicast traffic.
  *
  * More specifically, once we exceed the number of filters (indicated because
  * the i40e_t`i40e_resources.ifr_nmcastfilt ==
@@ -359,7 +359,6 @@
  * While bugs have been filed to cover this future work, the following gives an
  * overview of expected work:
  *
- *  o TSO support
  *  o Multiple group support
  *  o DMA binding and breaking up the locking in ring recycling.
  *  o Enhanced detection of device errors
@@ -371,7 +370,7 @@
 
 #include "i40e_sw.h"
 
-static char i40e_ident[] = "Intel 10/40Gb Ethernet v1.0.1";
+static char i40e_ident[] = "Intel 10/40Gb Ethernet v1.0.2";
 
 /*
  * The i40e_glock primarily protects the lists below and the i40e_device_t
@@ -1557,6 +1556,9 @@ i40e_init_properties(i40e_t *i40e)
 	    I40E_DEF_RX_LIMIT_PER_INTR);
 
 	i40e->i40e_tx_hcksum_enable = i40e_get_prop(i40e, "tx_hcksum_enable",
+	    B_FALSE, B_TRUE, B_TRUE);
+
+	i40e->i40e_tx_lso_enable = i40e_get_prop(i40e, "tx_lso_enable",
 	    B_FALSE, B_TRUE, B_TRUE);
 
 	i40e->i40e_rx_hcksum_enable = i40e_get_prop(i40e, "rx_hcksum_enable",

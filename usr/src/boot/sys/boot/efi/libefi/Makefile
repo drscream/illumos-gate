@@ -16,7 +16,7 @@
 
 include $(SRC)/Makefile.master
 
-CC=     $(GCC_ROOT)/bin/gcc
+CC=     $(GNUC_ROOT)/bin/gcc
 
 LIB=	efi
 
@@ -24,9 +24,22 @@ all:	lib$(LIB).a
 
 install:
 
-SRCS=	delay.c devicename.c devpath.c efi_console.c efi_driver_utils.c \
-	efichar.c efinet.c efipart.c efizfs.c env.c errno.c handles.c \
-	libefi.c time.c wchar.c
+SRCS=	delay.c \
+	devicename.c \
+	devpath.c \
+	efi_console.c \
+	efi_driver_utils.c \
+	efichar.c \
+	efienv.c \
+	efinet.c \
+	efipart.c \
+	efizfs.c \
+	env.c \
+	errno.c \
+	handles.c \
+	libefi.c \
+	time.c \
+	wchar.c
 
 #.if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
 #SRCS +=	time.c

@@ -135,7 +135,7 @@ struct vmx {
 	uint64_t	guest_msrs[VM_MAXCPU][GUEST_MSR_NUM];
 #ifndef	__FreeBSD__
 	uint64_t	host_msrs[VM_MAXCPU][GUEST_MSR_NUM];
-	uint64_t	tsc_offset[VM_MAXCPU];
+	uint64_t	tsc_offset_active[VM_MAXCPU];
 	boolean_t	ctx_loaded[VM_MAXCPU];
 #endif
 	struct vmxctx	ctx[VM_MAXCPU];
@@ -156,6 +156,9 @@ CTASSERT((offsetof(struct vmx, pir_desc[0]) & 63) == 0);
 #define	VMX_VMWRITE_ERROR	4
 int	vmx_enter_guest(struct vmxctx *ctx, struct vmx *vmx, int launched);
 void	vmx_call_isr(uintptr_t entry);
+#ifndef __FreeBSD__
+void	vmx_call_trap(uint64_t);
+#endif
 
 u_long	vmx_fix_cr0(u_long cr0);
 u_long	vmx_fix_cr4(u_long cr4);

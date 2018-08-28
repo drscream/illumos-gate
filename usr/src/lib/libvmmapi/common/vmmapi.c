@@ -384,13 +384,26 @@ vm_get_memseg(struct vmctx *ctx, int segid, size_t *lenp, char *namebuf,
 }
 
 static int
+#ifdef __FreeBSD__
 setup_memory_segment(struct vmctx *ctx, vm_paddr_t gpa, size_t len, char *base)
+#else
+setup_memory_segment(struct vmctx *ctx, int segid, vm_paddr_t gpa, size_t len,
+    char *base)
+#endif
 {
 	char *ptr;
 	int error, flags;
 
 	/* Map 'len' bytes starting at 'gpa' in the guest address space */
+#ifdef __FreeBSD__
 	error = vm_mmap_memseg(ctx, gpa, VM_SYSMEM, gpa, len, PROT_ALL);
+#else
+	/*
+	 * As we use two segments for lowmem/highmem the offset within the
+	 * segment is 0 on illumos.
+	 */
+	error = vm_mmap_memseg(ctx, gpa, segid, 0, len, PROT_ALL);
+#endif
 	if (error)
 		return (error);
 
@@ -430,9 +443,11 @@ vm_setup_memory(struct vmctx *ctx, size_t memsize, enum vm_mmap_style vms)
 		objsize = ctx->lowmem;
 	}
 
+#ifdef __FreeBSD__
 	error = vm_alloc_memseg(ctx, VM_SYSMEM, objsize, NULL);
 	if (error)
 		return (error);
+#endif
 
 	/*
 	 * Stake out a contiguous region covering the guest physical memory
@@ -440,11 +455,21 @@ vm_setup_memory(struct vmctx *ctx, size_t memsize, enum vm_mmap_style vms)
 	 */
 	len = VM_MMAP_GUARD_SIZE + objsize + VM_MMAP_GUARD_SIZE;
 	flags = MAP_PRIVATE | MAP_ANON | MAP_NOCORE | MAP_ALIGNED_SUPER;
+#ifndef __FreeBSD__
+	/*
+	 * There is no need to reserve swap for the guest physical memory and
+	 * guard regions. Actual memory is allocated and mapped later through
+	 * vm_alloc_memseg() and setup_memory_segment().
+	 */
+	flags |= MAP_NORESERVE;
+#endif
 	ptr = mmap(NULL, len, PROT_NONE, flags, -1, 0);
 	if (ptr == MAP_FAILED)
 		return (-1);
 
 	baseaddr = ptr + VM_MMAP_GUARD_SIZE;
+
+#ifdef __FreeBSD__
 	if (ctx->highmem > 0) {
 		gpa = 4*GB;
 		len = ctx->highmem;
@@ -460,6 +485,29 @@ vm_setup_memory(struct vmctx *ctx, size_t memsize, enum vm_mmap_style vms)
 		if (error)
 			return (error);
 	}
+#else
+	if (ctx->highmem > 0) {
+		error = vm_alloc_memseg(ctx, VM_HIGHMEM, ctx->highmem, NULL);
+		if (error)
+			return (error);
+		gpa = 4*GB;
+		len = ctx->highmem;
+		error = setup_memory_segment(ctx, VM_HIGHMEM, gpa, len, baseaddr);
+		if (error)
+			return (error);
+	}
+
+	if (ctx->lowmem > 0) {
+		error = vm_alloc_memseg(ctx, VM_LOWMEM, ctx->lowmem, NULL);
+		if (error)
+			return (error);
+		gpa = 0;
+		len = ctx->lowmem;
+		error = setup_memory_segment(ctx, VM_LOWMEM, gpa, len, baseaddr);
+		if (error)
+			return (error);
+	}
+#endif
 
 	ctx->baseaddr = baseaddr;
 
@@ -1545,6 +1593,13 @@ vm_suspended_cpus(struct vmctx *ctx, cpuset_t *cpus)
 }
 
 int
+vm_debug_cpus(struct vmctx *ctx, cpuset_t *cpus)
+{
+
+	return (vm_get_cpus(ctx, VM_DEBUG_CPUS, cpus));
+}
+
+int
 vm_activate_cpu(struct vmctx *ctx, int vcpu)
 {
 	struct vm_activate_cpu ac;
@@ -1553,6 +1608,30 @@ vm_activate_cpu(struct vmctx *ctx, int vcpu)
 	bzero(&ac, sizeof(struct vm_activate_cpu));
 	ac.vcpuid = vcpu;
 	error = ioctl(ctx->fd, VM_ACTIVATE_CPU, &ac);
+	return (error);
+}
+
+int
+vm_suspend_cpu(struct vmctx *ctx, int vcpu)
+{
+	struct vm_activate_cpu ac;
+	int error;
+
+	bzero(&ac, sizeof(struct vm_activate_cpu));
+	ac.vcpuid = vcpu;
+	error = ioctl(ctx->fd, VM_SUSPEND_CPU, &ac);
+	return (error);
+}
+
+int
+vm_resume_cpu(struct vmctx *ctx, int vcpu)
+{
+	struct vm_activate_cpu ac;
+	int error;
+
+	bzero(&ac, sizeof(struct vm_activate_cpu));
+	ac.vcpuid = vcpu;
+	error = ioctl(ctx->fd, VM_RESUME_CPU, &ac);
 	return (error);
 }
 
@@ -1646,6 +1725,38 @@ vm_restart_instruction(void *arg, int vcpu)
 }
 
 int
+vm_set_topology(struct vmctx *ctx,
+    uint16_t sockets, uint16_t cores, uint16_t threads, uint16_t maxcpus)
+{
+	struct vm_cpu_topology topology;
+
+	bzero(&topology, sizeof (struct vm_cpu_topology));
+	topology.sockets = sockets;
+	topology.cores = cores;
+	topology.threads = threads;
+	topology.maxcpus = maxcpus;
+	return (ioctl(ctx->fd, VM_SET_TOPOLOGY, &topology));
+}
+
+int
+vm_get_topology(struct vmctx *ctx,
+    uint16_t *sockets, uint16_t *cores, uint16_t *threads, uint16_t *maxcpus)
+{
+	struct vm_cpu_topology topology;
+	int error;
+
+	bzero(&topology, sizeof (struct vm_cpu_topology));
+	error = ioctl(ctx->fd, VM_GET_TOPOLOGY, &topology);
+	if (error == 0) {
+		*sockets = topology.sockets;
+		*cores = topology.cores;
+		*threads = topology.threads;
+		*maxcpus = topology.maxcpus;
+	}
+	return (error);
+}
+
+int
 vm_get_device_fd(struct vmctx *ctx)
 {
 
@@ -1673,9 +1784,10 @@ vm_get_ioctls(size_t *len)
 	    VM_SET_X2APIC_STATE, VM_GET_X2APIC_STATE,
 	    VM_GET_HPET_CAPABILITIES, VM_GET_GPA_PMAP, VM_GLA2GPA,
 	    VM_GLA2GPA_NOFAULT,
-	    VM_ACTIVATE_CPU, VM_GET_CPUS, VM_SET_INTINFO, VM_GET_INTINFO,
+	    VM_ACTIVATE_CPU, VM_GET_CPUS, VM_SUSPEND_CPU, VM_RESUME_CPU,
+	    VM_SET_INTINFO, VM_GET_INTINFO,
 	    VM_RTC_WRITE, VM_RTC_READ, VM_RTC_SETTIME, VM_RTC_GETTIME,
-	    VM_RESTART_INSTRUCTION };
+	    VM_RESTART_INSTRUCTION, VM_SET_TOPOLOGY, VM_GET_TOPOLOGY };
 
 	if (len == NULL) {
 		cmds = malloc(sizeof(vm_ioctl_cmds));

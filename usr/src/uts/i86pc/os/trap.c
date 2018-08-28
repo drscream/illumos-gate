@@ -1005,50 +1005,25 @@ trap(struct regs *rp, caddr_t addr, processorid_t cpuid)
 		fault = FLTIOVF;
 		break;
 
+	/*
+	 * When using an eager FPU on x86, the #NM trap is no longer meaningful.
+	 * Userland should not be able to trigger it. Anything that does
+	 * represents a fatal error in the kernel and likely in the register
+	 * state of the system. User FPU state should always be valid.
+	 */
 	case T_NOEXTFLT + USER:	/* math coprocessor not available */
-		if (tudebug && tudebugfpe)
-			showregs(type, rp, addr);
-		if (fpnoextflt(rp)) {
-			siginfo.si_signo = SIGILL;
-			siginfo.si_code  = ILL_ILLOPC;
-			siginfo.si_addr  = (caddr_t)rp->r_pc;
-			fault = FLTILL;
-		}
+	case T_NOEXTFLT:
+		(void) die(type, rp, addr, cpuid);
 		break;
 
-	case T_EXTOVRFLT:	/* extension overrun fault */
-		/* check if we took a kernel trap on behalf of user */
-		{
-			extern  void ndptrap_frstor(void);
-			if (rp->r_pc != (uintptr_t)ndptrap_frstor) {
-				sti(); /* T_EXTOVRFLT comes in via cmninttrap */
-				(void) die(type, rp, addr, cpuid);
-			}
-			type |= USER;
-		}
-		/*FALLTHROUGH*/
-	case T_EXTOVRFLT + USER:	/* extension overrun fault */
-		if (tudebug && tudebugfpe)
-			showregs(type, rp, addr);
-		if (fpextovrflt(rp)) {
-			siginfo.si_signo = SIGSEGV;
-			siginfo.si_code  = SEGV_MAPERR;
-			siginfo.si_addr  = (caddr_t)rp->r_pc;
-			fault = FLTBOUNDS;
-		}
-		break;
-
+	/*
+	 * Kernel threads leveraging floating point need to mask the exceptions
+	 * or ensure that they cannot happen. There is no recovery from this.
+	 */
 	case T_EXTERRFLT:	/* x87 floating point exception pending */
-		/* check if we took a kernel trap on behalf of user */
-		{
-			extern  void ndptrap_frstor(void);
-			if (rp->r_pc != (uintptr_t)ndptrap_frstor) {
-				sti(); /* T_EXTERRFLT comes in via cmninttrap */
-				(void) die(type, rp, addr, cpuid);
-			}
-			type |= USER;
-		}
-		/*FALLTHROUGH*/
+		sti(); /* T_EXTERRFLT comes in via cmninttrap */
+		(void) die(type, rp, addr, cpuid);
+		break;
 
 	case T_EXTERRFLT + USER: /* x87 floating point exception pending */
 		if (tudebug && tudebugfpe)
@@ -1951,7 +1926,7 @@ kern_gpfault(struct regs *rp)
 	}
 
 #if defined(__amd64)
-	if (trp == NULL && lwp->lwp_pcb.pcb_rupdate != 0) {
+	if (trp == NULL && PCB_NEED_UPDATE_SEGS(&lwp->lwp_pcb)) {
 
 		/*
 		 * This is the common case -- we're trying to load
@@ -2105,6 +2080,7 @@ dump_ttrace(void)
 #endif
 	/* Define format for the TYPE and VC fields */
 	const char fmt2[] = "%4s %3x";
+	const char fmt2s[] = "%4s %3s";
 	char data2[9];	/* length of string formatted by fmt2 + 1 */
 	/*
 	 * Define format for the HANDLER field. Width is arbitrary, but should
@@ -2194,6 +2170,14 @@ dump_ttrace(void)
 				break;
 
 			case TT_INTERRUPT:
+				if (rec->ttr_regs.r_trapno == T_SOFTINT) {
+					(void) snprintf(data2, sizeof (data2),
+					    fmt2s, "intr", "-");
+					(void) snprintf(data3, sizeof (data3),
+					    fmt3s, "(fakesoftint)");
+					break;
+				}
+
 				(void) snprintf(data2, sizeof (data2), fmt2,
 				    "intr", rec->ttr_vector);
 				if (get_intr_handler != NULL)

@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 1991, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2017, Joyent, Inc.  All rights reserved.
+ * Copyright (c) 2018 Joyent, Inc.
  */
 
 #include <sys/types.h>
@@ -74,6 +74,7 @@
 #include <sys/waitq.h>
 #include <sys/cpucaps.h>
 #include <sys/kiconv.h>
+#include <sys/ht.h>
 
 #ifndef	STACK_GROWTH_DOWN
 #error Stacks do not grow downward; 3b2 zombie attack detected!
@@ -507,8 +508,8 @@ thread_create(
 	if (CPU->cpu_part == &cp_default)
 		t->t_cpu = CPU;
 	else
-		t->t_cpu = disp_lowpri_cpu(cp_default.cp_cpulist, t->t_lpl,
-		    t->t_pri, NULL);
+		t->t_cpu = disp_lowpri_cpu(cp_default.cp_cpulist, t,
+		    t->t_pri);
 
 	t->t_disp_queue = t->t_cpu->cpu_disp;
 	kpreempt_enable();
@@ -1049,10 +1050,44 @@ installctx(
 	ctx->exit_op = exit;
 	ctx->free_op = free;
 	ctx->arg = arg;
-	ctx->next = t->t_ctx;
 	ctx->save_ts = 0;
 	ctx->restore_ts = 0;
+
+	/*
+	 * Keep ctxops in a doubly-linked list to allow traversal in both
+	 * directions.  Using only the newest-to-oldest ordering was adequate
+	 * previously, but reversing the order for restore_op actions is
+	 * necessary if later-added ctxops depends on earlier ones.
+	 *
+	 * One example of such a dependency:  Hypervisor software handling the
+	 * guest FPU expects that it save FPU state prior to host FPU handling
+	 * and consequently handle the guest logic _after_ the host FPU has
+	 * been restored.
+	 *
+	 * The t_ctx member points to the most recently added ctxop or is NULL
+	 * if no ctxops are associated with the thread.  The 'next' pointers
+	 * form a loop of the ctxops in newest-to-oldest order.  The 'prev'
+	 * pointers form a loop in the reverse direction, where t_ctx->prev is
+	 * the oldest entry associated with the thread.
+	 *
+	 * The protection of kpreempt_disable is required to safely perform the
+	 * list insertion, since there are inconsistent states between some of
+	 * the pointer assignments.
+	 */
+	kpreempt_disable();
+	if (t->t_ctx == NULL) {
+		ctx->next = ctx;
+		ctx->prev = ctx;
+	} else {
+		struct ctxop *head = t->t_ctx, *tail = t->t_ctx->prev;
+
+		ctx->next = head;
+		ctx->prev = tail;
+		head->prev = ctx;
+		tail->next = ctx;
+	}
 	t->t_ctx = ctx;
+	kpreempt_enable();
 }
 
 /*
@@ -1069,7 +1104,7 @@ removectx(
 	void	(*exit)(void *),
 	void	(*free)(void *, int))
 {
-	struct ctxop *ctx, *prev_ctx;
+	struct ctxop *ctx, *head;
 
 	/*
 	 * The incoming kthread_t (which is the thread for which the
@@ -1094,17 +1129,31 @@ removectx(
 	 * and the target thread from racing with each other during lwp exit.
 	 */
 	mutex_enter(&t->t_ctx_lock);
-	prev_ctx = NULL;
 	kpreempt_disable();
-	for (ctx = t->t_ctx; ctx != NULL; ctx = ctx->next) {
+
+	if (t->t_ctx == NULL) {
+		mutex_exit(&t->t_ctx_lock);
+		kpreempt_enable();
+		return (0);
+	}
+
+	ctx = head = t->t_ctx;
+	do {
 		if (ctx->save_op == save && ctx->restore_op == restore &&
 		    ctx->fork_op == fork && ctx->lwp_create_op == lwp_create &&
 		    ctx->exit_op == exit && ctx->free_op == free &&
 		    ctx->arg == arg) {
-			if (prev_ctx)
-				prev_ctx->next = ctx->next;
-			else
+			ctx->prev->next = ctx->next;
+			ctx->next->prev = ctx->prev;
+			if (ctx->next == ctx) {
+				/* last remaining item */
+				t->t_ctx = NULL;
+			} else if (ctx == t->t_ctx) {
+				/* fix up head of list */
 				t->t_ctx = ctx->next;
+			}
+			ctx->next = ctx->prev = NULL;
+
 			mutex_exit(&t->t_ctx_lock);
 			if (ctx->free_op != NULL)
 				(ctx->free_op)(ctx->arg, 0);
@@ -1112,50 +1161,70 @@ removectx(
 			kpreempt_enable();
 			return (1);
 		}
-		prev_ctx = ctx;
-	}
+
+		ctx = ctx->next;
+	} while (ctx != head);
+
 	mutex_exit(&t->t_ctx_lock);
 	kpreempt_enable();
-
 	return (0);
 }
 
 void
 savectx(kthread_t *t)
 {
-	struct ctxop *ctx;
-
 	ASSERT(t == curthread);
-	for (ctx = t->t_ctx; ctx != 0; ctx = ctx->next) {
-		if (ctx->save_op != NULL) {
-			ctx->save_ts = gethrtime_unscaled();
-			(ctx->save_op)(ctx->arg);
-		}
+
+	if (t->t_ctx != NULL) {
+		struct ctxop *ctx, *head;
+
+		/* Forward traversal */
+		ctx = head = t->t_ctx;
+		do {
+			if (ctx->save_op != NULL) {
+				ctx->save_ts = gethrtime_unscaled();
+				(ctx->save_op)(ctx->arg);
+			}
+			ctx = ctx->next;
+		} while (ctx != head);
 	}
 }
 
 void
 restorectx(kthread_t *t)
 {
-	struct ctxop *ctx;
-
 	ASSERT(t == curthread);
-	for (ctx = t->t_ctx; ctx != 0; ctx = ctx->next) {
-		if (ctx->restore_op != NULL) {
-			ctx->restore_ts = gethrtime_unscaled();
-			(ctx->restore_op)(ctx->arg);
-		}
+
+	if (t->t_ctx != NULL) {
+		struct ctxop *ctx, *tail;
+
+		/* Backward traversal (starting at the tail) */
+		ctx = tail = t->t_ctx->prev;
+		do {
+			if (ctx->restore_op != NULL) {
+				ctx->restore_ts = gethrtime_unscaled();
+				(ctx->restore_op)(ctx->arg);
+			}
+			ctx = ctx->prev;
+		} while (ctx != tail);
 	}
 }
 
 void
 forkctx(kthread_t *t, kthread_t *ct)
 {
-	struct ctxop *ctx;
+	if (t->t_ctx != NULL) {
+		struct ctxop *ctx, *head;
 
-	for (ctx = t->t_ctx; ctx != NULL; ctx = ctx->next)
-		if (ctx->fork_op != NULL)
-			(ctx->fork_op)(t, ct);
+		/* Forward traversal */
+		ctx = head = t->t_ctx;
+		do {
+			if (ctx->fork_op != NULL) {
+				(ctx->fork_op)(t, ct);
+			}
+			ctx = ctx->next;
+		} while (ctx != head);
+	}
 }
 
 /*
@@ -1166,11 +1235,18 @@ forkctx(kthread_t *t, kthread_t *ct)
 void
 lwp_createctx(kthread_t *t, kthread_t *ct)
 {
-	struct ctxop *ctx;
+	if (t->t_ctx != NULL) {
+		struct ctxop *ctx, *head;
 
-	for (ctx = t->t_ctx; ctx != NULL; ctx = ctx->next)
-		if (ctx->lwp_create_op != NULL)
-			(ctx->lwp_create_op)(t, ct);
+		/* Forward traversal */
+		ctx = head = t->t_ctx;
+		do {
+			if (ctx->lwp_create_op != NULL) {
+				(ctx->lwp_create_op)(t, ct);
+			}
+			ctx = ctx->next;
+		} while (ctx != head);
+	}
 }
 
 /*
@@ -1183,11 +1259,18 @@ lwp_createctx(kthread_t *t, kthread_t *ct)
 void
 exitctx(kthread_t *t)
 {
-	struct ctxop *ctx;
+	if (t->t_ctx != NULL) {
+		struct ctxop *ctx, *head;
 
-	for (ctx = t->t_ctx; ctx != NULL; ctx = ctx->next)
-		if (ctx->exit_op != NULL)
-			(ctx->exit_op)(t);
+		/* Forward traversal */
+		ctx = head = t->t_ctx;
+		do {
+			if (ctx->exit_op != NULL) {
+				(ctx->exit_op)(t);
+			}
+			ctx = ctx->next;
+		} while (ctx != head);
+	}
 }
 
 /*
@@ -1197,14 +1280,21 @@ exitctx(kthread_t *t)
 void
 freectx(kthread_t *t, int isexec)
 {
-	struct ctxop *ctx;
-
 	kpreempt_disable();
-	while ((ctx = t->t_ctx) != NULL) {
-		t->t_ctx = ctx->next;
-		if (ctx->free_op != NULL)
-			(ctx->free_op)(ctx->arg, isexec);
-		kmem_free(ctx, sizeof (struct ctxop));
+	if (t->t_ctx != NULL) {
+		struct ctxop *ctx, *head;
+
+		ctx = head = t->t_ctx;
+		t->t_ctx = NULL;
+		do {
+			struct ctxop *next = ctx->next;
+
+			if (ctx->free_op != NULL) {
+				(ctx->free_op)(ctx->arg, isexec);
+			}
+			kmem_free(ctx, sizeof (struct ctxop));
+			ctx = next;
+		} while (ctx != head);
 	}
 	kpreempt_enable();
 }
@@ -1219,17 +1309,22 @@ freectx(kthread_t *t, int isexec)
 void
 freectx_ctx(struct ctxop *ctx)
 {
-	struct ctxop *nctx;
+	struct ctxop *head = ctx;
 
 	ASSERT(ctx != NULL);
 
 	kpreempt_disable();
+
+	head = ctx;
 	do {
-		nctx = ctx->next;
-		if (ctx->free_op != NULL)
+		struct ctxop *next = ctx->next;
+
+		if (ctx->free_op != NULL) {
 			(ctx->free_op)(ctx->arg, 0);
+		}
 		kmem_free(ctx, sizeof (struct ctxop));
-	} while ((ctx = nctx) != NULL);
+		ctx = next;
+	} while (ctx != head);
 	kpreempt_enable();
 }
 
@@ -1327,6 +1422,8 @@ thread_unpin()
 
 	itp = t->t_intr;		/* interrupted thread */
 	t->t_intr = NULL;		/* clear interrupt ptr */
+
+	ht_end_intr();
 
 	/*
 	 * Get state from interrupt thread for the one
